@@ -356,7 +356,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
 
-    val fm = new MVMALSRegression(trainSet, stepSize, Array(maxUserId, numFeatures),
+    val fm = new MVMRegression(trainSet, stepSize, Array(maxUserId, numFeatures),
       regParam, 0.0, rank, useAdaGrad, miniBatchFraction)
 
 

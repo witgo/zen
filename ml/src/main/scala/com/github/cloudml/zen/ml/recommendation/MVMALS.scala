@@ -79,21 +79,11 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
     this
   }
 
-  def stepSize: Double
-
   def views: Array[Long]
 
-  def regParam: Double
-
-  def elasticNetParam: Double
-
-  def halfLife: Int = 40
-
-  def epsilon: Double = 1e-6
+  def lambda: Double
 
   def rank: Int
-
-  def useAdaGrad: Boolean
 
   def storageLevel: StorageLevel
 
@@ -182,7 +172,6 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   // Updater for elastic net regularized problems
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
-    val lambda = regParam
     dataSet.vertices.leftJoin(gradient) { (featureId, attr, gradient) =>
       val viewId = featureId2viewId(featureId, views)
       gradient match {
@@ -215,27 +204,20 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
 
 class MVMALSRegression(
   @transient _dataSet: Graph[VD, ED],
-  val stepSize: Double,
+  val lambda: Double,
   val views: Array[Long],
-  val regParam: Double,
-  val elasticNetParam: Double,
   val rank: Int,
-  val useAdaGrad: Boolean,
   val miniBatchFraction: Double,
   val storageLevel: StorageLevel) extends MVMALS {
 
   def this(
     input: RDD[(VertexId, LabeledPoint)],
-    stepSize: Double = 1e-2,
+    lambda: Double = 1e-2,
     views: Array[Long],
-    regL2: Double = 1e-3,
-    elasticNetParam: Double = 1e-3,
     rank: Int = 20,
-    useAdaGrad: Boolean = true,
     miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK) {
-    this(initializeDataSet(input, views, rank, storageLevel), stepSize, views, regL2, elasticNetParam, rank,
-      useAdaGrad, miniBatchFraction, storageLevel)
+    this(initializeDataSet(input, views, rank, storageLevel), lambda, views, rank, miniBatchFraction, storageLevel)
   }
 
   setDataSet(_dataSet)
@@ -281,10 +263,7 @@ object MVMALS {
    * MVM 回归
    * @param input 训练数据
    * @param numIterations 迭代次数
-   * @param stepSize  学习步长推荐 1e-2 - 1e-1
-   * @param regL2   L2范数
    * @param rank   特征分解向量的维度推荐 10-20
-   * @param useAdaGrad 使用 AdaGrad训练
    * @param miniBatchFraction  每次迭代采样比例
    * @param storageLevel   缓存级别
    * @return
@@ -293,20 +272,16 @@ object MVMALS {
   def trainRegression(
     input: RDD[(Long, LabeledPoint)],
     numIterations: Int,
-    stepSize: Double,
+    lambda: Double,
     views: Array[Long],
-    regL2: Double,
-    elasticNetParam: Double,
     rank: Int,
-    useAdaGrad: Boolean = true,
     miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK): MVMModel = {
     val data = input.map { case (id, labeledPoint) =>
       assert(id >= 0.0, s"sampleId $id less than 0")
       (id, labeledPoint)
     }
-    val lfm = new MVMALSRegression(data, stepSize, views, regL2, elasticNetParam, rank,
-      useAdaGrad, miniBatchFraction, storageLevel)
+    val lfm = new MVMALSRegression(data, lambda, views, rank, miniBatchFraction, storageLevel)
     lfm.run(numIterations)
     val model = lfm.saveModel()
     model
