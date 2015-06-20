@@ -108,8 +108,8 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       val startedAt = System.nanoTime()
       val previousVertices = vertices
       val margin = forward(iter)
-      val (thisNumSamples, costSum, gradient) = backward(margin, iter)
-      vertices = updateWeight(gradient, iter)
+      val (thisNumSamples, costSum, delta) = backward(margin, iter)
+      vertices = updateWeight(delta, iter)
       checkpointVertices()
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
@@ -121,7 +121,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       previousVertices.unpersist(blocking = false)
       margin.unpersist(blocking = false)
       multi.unpersist(blocking = false)
-      gradient.unpersist(blocking = false)
+      delta.unpersist(blocking = false)
       innerIter += 1
     }
   }
@@ -142,7 +142,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
         val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
         ctx.sendToDst(result)
       }
-    }, forwardReduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
+    }, reduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
   }
 
   protected def predict(arr: Array[Double]): Double
@@ -163,13 +163,13 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
         val m = backwardInterval(rank, viewId, x, arr, arr.last)
         ctx.sendToSrc(m)
       }
-    }, forwardReduceInterval, TripletFields.Dst).mapValues { ws =>
+    }, reduceInterval, TripletFields.All).mapValues { ws =>
       ws.map(_ / 1.0)
-    }
-    (thisNumSamples, costSum, gradient.setName(s"gradient-$iter").persist(storageLevel))
+    }.setName(s"gradient-$iter").persist(storageLevel)
+    (thisNumSamples, costSum, gradient)
   }
 
-  // Updater for elastic net regularized problems
+  // Updater for CD problems
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
     dataSet.vertices.leftJoin(gradient) { (featureId, attr, gradient) =>
@@ -177,13 +177,17 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       gradient match {
         case Some(grad) =>
           val weight = attr
-          if (iter % views.length == viewId) {
+          println(s"$featureId=> ${weight.mkString(" ")}")
+          if (iter % 7 == featureId) {
             var i = 0
             while (i < rank) {
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)
               weight(i) = (w * h2 + he) / (h2 + lambda)
+              if (Utils.random.nextDouble() < 1) {
+                println(s"he: $he => h2: $h2 => w: $w => weight: ${weight(i)} => lambda:$lambda")
+              }
               i += 1
             }
           }
@@ -221,7 +225,8 @@ class MVMALSRegression(
   }
 
   setDataSet(_dataSet)
-  assert(rank > 1, s"rank $rank less than 2")
+
+  // assert(rank > 1, s"rank $rank less than 2")
 
   // val max = samples.map(_._2.head).max
   // val min = samples.map(_._2.head).min
@@ -237,21 +242,26 @@ class MVMALSRegression(
     val multi = dataSet.vertices.leftJoin(q) { (vid, data, deg) =>
       deg match {
         case Some(m) =>
+          assert(data.length == 1)
           val y = data.head
-          val diff = predict(m) - y
-          val ret = sumInterval(rank, m)
-          ret(ret.length - 1) = diff
-          ret
+          println(m.mkString(" "))
+          val arr = sumInterval(rank, m)
+          println(arr.mkString(" "))
+
+          val perd = arr.last
+          // assert(abs(perd -  predict(m)) < 1e-4)
+          val diff = y - perd
+          println(s"diff: $diff")
+          arr(arr.length - 1) = diff
+          arr
         case _ => data
       }
     }
     multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val (numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map { t =>
-      (1L, pow(t._2.last, 2))
-    }.reduce { (a, b) =>
-      ((a._1 + b._1), (a._2 + b._2))
-    }
-    (numSamples, costSum, multi)
+    val Array(numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map { t =>
+      Array(1D, pow(t._2.last, 2))
+    }.reduce(reduceInterval)
+    (numSamples.toLong, costSum, multi)
   }
 }
 
@@ -260,7 +270,7 @@ object MVMALS {
   private[ml] type VD = Array[Double]
 
   /**
-   * MVM 回归
+   * MVMALS 回归
    * @param input 训练数据
    * @param numIterations 迭代次数
    * @param rank   特征分解向量的维度推荐 10-20
@@ -313,7 +323,7 @@ object MVMALS {
     } ++ edges.map(_.srcId).distinct().map { featureId =>
       // parameter point
       val parms = Array.fill(rank) {
-        Utils.random.nextGaussian() * 1e-2
+        1e-2
       }
       (featureId, parms)
     }).repartition(input.partitions.length)
@@ -356,7 +366,7 @@ object MVMALS {
    * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
    */
   private[ml] def predictInterval(rank: Int, arr: VD): ED = {
-    val viewSize = arr.length / rank
+    val viewSize: Int = arr.length / rank
     var sum = 0.0
     var i = 0
     while (i < rank) {
@@ -372,8 +382,9 @@ object MVMALS {
     sum
   }
 
-  private[ml] def forwardReduceInterval(a: VD, b: VD): VD = {
+  private[ml] def reduceInterval(a: VD, b: VD): VD = {
     var i = 0
+    assert(a.length == b.length)
     while (i < a.length) {
       a(i) += b(i)
       i += 1
@@ -414,13 +425,16 @@ object MVMALS {
     x: ED,
     arr: VD,
     multi: ED): VD = {
+    println(s"x:$x => ${arr.mkString(" ")} => $multi => $viewId")
     val m = new Array[Double](rank * 2)
     var i = 0
     while (i < rank) {
-      m(i) = multi * x * arr(i + viewId * rank)
-      m(i + rank) = pow(x * arr(i + viewId * rank), 2)
+      val hx = x * arr(i + viewId * rank)
+      m(i) += multi * hx
+      m(i + rank) += pow(hx, 2)
       i += 1
     }
+    println(s"m: ${m.mkString(" ")}")
     m
   }
 
@@ -429,8 +443,9 @@ object MVMALS {
    * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
    */
   private[ml] def sumInterval(rank: Int, arr: Array[Double]): VD = {
-    val viewSize = arr.length / rank
+    val viewSize: Int = arr.length / rank
     val m = new Array[Double](rank)
+    var sum = 0.0
     var i = 0
     while (i < rank) {
       var multi = 1.0
@@ -440,6 +455,7 @@ object MVMALS {
         viewId += 1
       }
       m(i) += multi
+      sum += multi
       i += 1
     }
 
@@ -459,6 +475,7 @@ object MVMALS {
 
       i += 1
     }
+    ret(rank * viewSize) = sum
     ret
   }
 }

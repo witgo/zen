@@ -31,7 +31,7 @@ import org.scalatest.{Matchers, FunSuite}
 
 class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
 
-  test("movieLens 100k regression") {
+  ignore("movieLens 100k regression") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
 
     import com.github.cloudml.zen.ml.recommendation._
@@ -63,7 +63,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     dataSet.count()
     movieLens.unpersist()
 
-    val lambda = 0.01
+    val lambda = 1e-1
     val numIterations = 600
     val rank = 10
     val views = Array(maxUserId, numFeatures).map(_.toLong)
@@ -76,5 +76,40 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     val model = fm.saveModel()
     println(f"Test loss: ${model.loss(testSet)}%1.4f")
 
+  }
+
+  test("1 regression") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+
+    import com.github.cloudml.zen.ml.recommendation._
+    val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
+    val checkpointDir = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpointDir)
+
+
+    val maxMovieId = 2
+    val maxUserId = 2
+    val movieId = 1
+    val userId = 0
+    val rating = 3
+    val numFeatures = maxUserId + maxMovieId
+
+    val sv = BSV.zeros[Double](numFeatures)
+    sv(userId) = 1.0
+    sv(movieId + maxUserId) = 1.0
+    println(sv)
+    val labeledPoint = new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used),
+      sv.data.slice(0, sv.used)))
+
+    val dataSet = sc.parallelize(Seq((1L, labeledPoint)))
+
+    val lambda = 1e-1
+    val numIterations = 10
+    val rank = 6
+    val views = Array(maxUserId, numFeatures).map(_.toLong)
+    val miniBatchFraction = 1
+
+    val fm = new MVMALSRegression(dataSet, lambda, views, rank, miniBatchFraction)
+    fm.run(numIterations)
   }
 }

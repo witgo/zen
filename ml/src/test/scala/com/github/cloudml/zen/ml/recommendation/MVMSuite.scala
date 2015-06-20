@@ -30,6 +30,7 @@ import org.apache.spark.storage.StorageLevel
 import org.scalatest.{Matchers, FunSuite}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
+
   ignore("binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
@@ -197,11 +198,11 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val stepSize = 0.1
-    val numIterations = 4000
-    val regParam = 1e-2
+    val numIterations = 200
+    val regParam = 5
     val l2 = (regParam, regParam, regParam)
     val elasticNetParam = 0.0
-    val rank = 10
+    val rank = 20
     val useAdaGrad = true
     val miniBatchFraction = 1
     val views = Array(maxUserId, numFeatures).map(_.toLong)
@@ -290,22 +291,22 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     dataSet.count()
     nfPrize.unpersist()
 
-    val stepSize = 0.1
-    val numIterations = 200
-    val regParam = 1e-3
+    val stepSize = 0.05
+    val numIterations = 2000
+    val regParam = 1e-2
     val l2 = (regParam, regParam, regParam)
     val rank = 5
     val useAdaGrad = true
-    val miniBatchFraction = 1
-    val Array(trainSet, testSet, _) = dataSet.randomSplit(Array(0.8, 0.1, 0.1))
+    val miniBatchFraction = 0.1
+    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     dataSet.unpersist()
 
-    //  val fm = new MVMRegression(trainSet, stepSize, Array(maxUserId, numFeatures), regParam,
-    //   rank, useAdaGrad, miniBatchFraction)
+    val fm = new MVMRegression(trainSet, stepSize, Array(maxUserId, numFeatures), regParam, 0.0,
+      rank, useAdaGrad, miniBatchFraction)
 
-    val fm = new FMRegression(trainSet, stepSize, l2, rank, useAdaGrad, miniBatchFraction)
+    // val fm = new FMRegression(trainSet, stepSize, l2, rank, useAdaGrad, miniBatchFraction)
 
     fm.run(numIterations)
     val model = fm.saveModel()
@@ -346,13 +347,13 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val stepSize = 0.1
-    val numIterations = 600
-    val regParam = 1.0
+    val numIterations = 50
+    val regParam = 5
     val l2 = (regParam, regParam, regParam)
-    val rank = 10
+    val rank = 8
     val useAdaGrad = true
     val miniBatchFraction = 1
-    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.4, 0.6))
+    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
 

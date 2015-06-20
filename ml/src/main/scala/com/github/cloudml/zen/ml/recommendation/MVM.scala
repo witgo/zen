@@ -154,7 +154,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
         val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
         ctx.sendToDst(result)
       }
-    }, forwardReduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
+    }, reduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
   }
 
   protected def predict(arr: Array[Double]): Double
@@ -176,7 +176,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
         // send the multi directly
         ctx.sendToSrc(m)
       }
-    }, forwardReduceInterval, TripletFields.Dst).mapValues { gradients =>
+    }, reduceInterval, TripletFields.Dst).mapValues { gradients =>
       gradients.map(_ / thisNumSamples)
     }
     (thisNumSamples, costSum, gradient.setName(s"gradient-$iter").persist(storageLevel))
@@ -192,11 +192,12 @@ private[ml] abstract class MVM extends Serializable with Logging {
       gradient match {
         case Some(grad) =>
           val weight = attr
+          val wd = weight.last
           var i = 0
           while (i < rank) {
-            weight(i) -= thisIterStepSize * (grad(i) + regParamL2 * weight(i))
+            weight(i) -= thisIterStepSize * (grad(i) + regParamL2 * wd * weight(i))
             val wi = weight(i)
-            weight(i) = signum(wi) * max(0.0, abs(wi) - shrinkageVal)
+            weight(i) = signum(wi) * max(0.0, abs(wi) - wd * shrinkageVal)
             i += 1
           }
           weight
@@ -342,20 +343,20 @@ class MVMClassification(
       deg match {
         case Some(m) =>
           val y = data.head
-          val diff = predict(m) - y
-          val ret = sumInterval(rank, m)
-          ret(ret.length - 1) = diff
-          ret
+          // val diff = predict(m) - y
+          val arr = sumInterval(rank, m)
+          val diff = arr.last - y
+          arr(arr.length - 1) = diff
+          arr
         case _ => data
       }
     }
     multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val (numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map { t =>
-      (1L, pow(t._2.last / 2, 2))
-    }.reduce { (a, b) =>
-      ((a._1 + b._1), (a._2 + b._2))
-    }
-    (numSamples, costSum, multi)
+    val Array(numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map {
+      case (_, arr) =>
+        Array(1D, pow(arr.last, 2))
+    }.reduce(reduceInterval)
+    (numSamples.toLong, costSum, multi)
   }
 
 }
@@ -403,20 +404,19 @@ class MVMRegression(
       deg match {
         case Some(m) =>
           val y = data.head
-          val diff = predict(m) - y
-          val ret = sumInterval(rank, m)
-          ret(ret.length - 1) = diff * 2.0
-          ret
+          val arr = sumInterval(rank, m)
+          val diff = arr.last - y
+          arr(arr.length - 1) = diff * 2.0
+          arr
         case _ => data
       }
     }
     multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val (numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map { t =>
-      (1L, pow(t._2.last / 2, 2))
-    }.reduce { (a, b) =>
-      ((a._1 + b._1), (a._2 + b._2))
-    }
-    (numSamples, costSum, multi)
+    val Array(numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map {
+      case (_, arr) =>
+        Array(1D, pow(arr.last / 2.0, 2))
+    }.reduce(reduceInterval)
+    (numSamples.toLong, costSum, multi)
   }
 }
 
@@ -512,18 +512,29 @@ object MVM {
     }.persist(storageLevel)
     edges.count()
 
+    val numSamples = input.count().toDouble
+    val inDegrees = edges.map(e => (e.srcId, 1L)).reduceByKey(_ + _).map {
+      case (featureId, deg) =>
+        (featureId, deg / (numSamples + 1.0))
+    }
+
+    val features = edges.map(_.srcId).distinct().map { featureId =>
+      // parameter point
+      val parms = Array.fill(rank + 1) {
+        Utils.random.nextGaussian() * 1e-2
+      }
+      (featureId, parms)
+    }.join(inDegrees).map { case (featureId, (parms, deg)) =>
+      parms(parms.length - 1) = deg
+      (featureId, parms)
+    }
+
     val vertices = (input.map { case (sampleId, labelPoint) =>
       val newId = newSampleId(sampleId)
       val label = Array(labelPoint.label)
       // label point
       (newId, label)
-    } ++ edges.map(_.srcId).distinct().map { featureId =>
-      // parameter point
-      val parms = Array.fill(rank) {
-        Utils.random.nextGaussian() * 1e-2
-      }
-      (featureId, parms)
-    }).repartition(input.partitions.length)
+    } ++ features).repartition(input.partitions.length)
     vertices.persist(storageLevel)
     vertices.count()
 
@@ -579,7 +590,7 @@ object MVM {
     sum
   }
 
-  private[ml] def forwardReduceInterval(a: VD, b: VD): VD = {
+  private[ml] def reduceInterval(a: VD, b: VD): VD = {
     var i = 0
     while (i < a.length) {
       a(i) += b(i)
@@ -637,6 +648,7 @@ object MVM {
   private[ml] def sumInterval(rank: Int, arr: Array[Double]): VD = {
     val viewSize = arr.length / rank
     val m = new Array[Double](rank)
+    var sum = 0.0
     var i = 0
     while (i < rank) {
       var multi = 1.0
@@ -646,6 +658,7 @@ object MVM {
         viewId += 1
       }
       m(i) += multi
+      sum += multi
       i += 1
     }
 
@@ -665,6 +678,7 @@ object MVM {
 
       i += 1
     }
+    ret(rank * viewSize) = sum
     ret
   }
 }
