@@ -344,6 +344,8 @@ class TFClassification(
   }
 
   override protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
+    val accNumSamples = q.sparkContext.accumulator(1L)
+    val accLossSum = q.sparkContext.accumulator(0.0)
     val multi = dataSet.vertices.leftJoin(q) { (vid, data, deg) =>
       deg match {
         case Some(m) =>
@@ -353,21 +355,17 @@ class TFClassification(
           val sum = arr.last
           val z = predict(m)
           val diff = z - y
-          val loss = if (y > 0.0) Utils.log1pExp(-sum) else Utils.log1pExp(sum)
+          accNumSamples += 1L
+          accLossSum += (if (y > 0.0) Utils.log1pExp(-sum) else Utils.log1pExp(sum))
           arr(arr.length - 1) = diff
-          (arr, loss)
-        case _ => (data, 0.0)
+          arr
+        case _ => data
       }
-    }
-    multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val Array(numSamples, costSum) = multi.filter(t => t._2._1.length == rank * views.length + 1).map {
-      case (_, (arr, loss)) =>
-        Array(1D, loss)
-    }.reduce(reduceInterval)
-    val newMulti = multi.mapValues(_._1).setName(s"multiplier-$iter").persist(storageLevel)
-    newMulti.count()
-    multi.unpersist(blocking = false)
-    (numSamples.toLong, costSum / numSamples, newMulti)
+    }.setName(s"multiplier-$iter").persist(storageLevel)
+    multi.count()
+    val numSamples = accNumSamples.value
+    val lossSum = accLossSum.value
+    (numSamples.toLong, lossSum / numSamples, multi)
   }
 
 }
@@ -413,22 +411,24 @@ class TFRegression(
   }
 
   override protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
+    val accNumSamples = q.sparkContext.accumulator(1L)
+    val accLossSum = q.sparkContext.accumulator(0.0)
     val multi = dataSet.vertices.leftJoin(q) { (vid, data, deg) =>
       deg match {
         case Some(m) =>
           val y = data.head
           val arr = sumInterval(rank, m)
           val diff = arr.last - y
+          accLossSum += diff
+          accNumSamples += 1L
           arr(arr.length - 1) = diff * 2.0
           arr
         case _ => data
       }
-    }
-    multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val Array(numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map {
-      case (_, arr) =>
-        Array(1D, pow(arr.last / 2.0, 2))
-    }.reduce(reduceInterval)
+    }.setName(s"multiplier-$iter").persist(storageLevel)
+    multi.count()
+    val numSamples = accNumSamples.value
+    val costSum = accLossSum.value
     (numSamples.toLong, sqrt(costSum / numSamples), multi)
   }
 }
