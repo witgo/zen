@@ -339,7 +339,11 @@ class FMClassification(
 
   override protected def predict(arr: Array[Double]): Double = {
     val result = predictInterval(rank, bias, arr)
-    1.0 / (1.0 + math.exp(-result))
+    sigmoid(result)
+  }
+
+  @inline private def sigmoid(x: Double): Double = {
+    1d / (1d + math.exp(-x))
   }
 
   override def saveModel(): FMModel = {
@@ -353,11 +357,11 @@ class FMClassification(
       deg match {
         case Some(m) =>
           val y = data.head
-          val diff = predict(m) - y
+          //  val diff = predict(m) - y
           val z = predictInterval(rank, bias, m)
-          val loss = if (y > 0.0) Utils.log1pExp(-z) else Utils.log1pExp(z)
+          val diff = sigmoid(z) - y
           accNumSamples += 1L
-          accLossSum += loss
+          accLossSum += Utils.log1pExp(if (y > 0.0) -z else z)
           val sum = sumInterval(rank, m)
           sum(0) = diff
           sum
@@ -417,7 +421,7 @@ class FMRegression(
           val diff = predict(m) - y
           val sum = sumInterval(rank, m)
           accNumSamples += 1L
-          accLossSum += diff
+          accLossSum += pow(diff, 2)
           sum(0) = 2.0 * diff
           sum
         case _ => data

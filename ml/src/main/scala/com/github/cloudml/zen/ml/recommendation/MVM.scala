@@ -128,7 +128,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $rmse")
+      println(s"(Iteration $iter/$iterations) RMSE:                     $rmse")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -340,7 +340,11 @@ class MVMClassification(
 
   override protected def predict(arr: Array[Double]): Double = {
     val result = predictInterval(rank, arr)
-    1.0 / (1.0 + math.exp(-result))
+    sigmoid(result)
+  }
+
+  @inline private def sigmoid(x: Double): Double = {
+    1d / (1d + math.exp(-x))
   }
 
   override def saveModel(): MVMModel = {
@@ -357,9 +361,9 @@ class MVMClassification(
           // val diff = predict(m) - y
           val arr = sumInterval(rank, m)
           val z = arr.last
-          val diff = predict(m) - y
+          val diff = sigmoid(z) - y
           accNumSamples += 1L
-          accLossSum += (if (y > 0.0) Utils.log1pExp(-z) else Utils.log1pExp(z))
+          accLossSum += Utils.log1pExp(if (y > 0.0) -z else z)
           arr(arr.length - 1) = diff
           arr
         case _ => data
@@ -423,7 +427,7 @@ class MVMRegression(
           val y = data.head
           val arr = sumInterval(rank, m)
           val diff = arr.last - y
-          accLossSum += diff
+          accLossSum += pow(diff, 2)
           accNumSamples += 1L
           arr(arr.length - 1) = diff * 2.0
           arr

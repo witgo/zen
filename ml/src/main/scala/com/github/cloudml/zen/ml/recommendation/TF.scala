@@ -336,7 +336,11 @@ class TFClassification(
 
   override protected def predict(arr: Array[Double]): Double = {
     val result = predictInterval(rank, arr)
-    1.0 / (1.0 + math.exp(-result))
+    sigmoid(result)
+  }
+
+  @inline private def sigmoid(x: Double): Double = {
+    1d / (1d + math.exp(-x))
   }
 
   override def saveModel(): TFModel = {
@@ -352,12 +356,11 @@ class TFClassification(
           val y = data.head
           // val diff = predict(m) - y
           val arr = sumInterval(rank, m)
-          val sum = arr.last
-          val z = predict(m)
-          val diff = z - y
+          val z = arr.last
+          val diff = sigmoid(z) - y
           accNumSamples += 1L
-          accLossSum += (if (y > 0.0) Utils.log1pExp(-sum) else Utils.log1pExp(sum))
-          arr(arr.length - 1) = diff
+          accLossSum += Utils.log1pExp(if (y > 0.0) -z else z)
+          arr(arr.length - 1) =  diff
           arr
         case _ => data
       }
@@ -419,7 +422,7 @@ class TFRegression(
           val y = data.head
           val arr = sumInterval(rank, m)
           val diff = arr.last - y
-          accLossSum += diff
+          accLossSum += pow(diff, 2)
           accNumSamples += 1L
           arr(arr.length - 1) = diff * 2.0
           arr
