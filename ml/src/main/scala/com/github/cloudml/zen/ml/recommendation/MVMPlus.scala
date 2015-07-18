@@ -55,7 +55,7 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
   // SGD
   @transient protected var dataSet: Graph[VD, ED] = null
   @transient protected var multi: VertexRDD[Array[Double]] = null
-  @transient protected var gradientSum: (Double, VertexRDD[Array[Double]]) = null
+  @transient protected var gradientSum: VertexRDD[Array[Double]] = null
   @transient protected var vertices: VertexRDD[VD] = null
   @transient protected var edges: EdgeRDD[ED] = null
   @transient private var innerIter = 1
@@ -178,8 +178,15 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
         val m = backwardInterval(rank, viewId, x, arr, arr.last)
         ctx.sendToSrc(m)
       }
-    }, reduceInterval, TripletFields.Dst).mapValues { gradients =>
-      gradients.map(_ / thisNumSamples)
+    }, reduceInterval, TripletFields.Dst).mapValues { grad =>
+      val w = new Array[Double](rank)
+      val deg = grad.last
+      var i = 0
+      while (i < rank) {
+        w(i) = grad(i) / deg
+        i += 1
+      }
+      w
     }
     (thisNumSamples, costSum, (gradW0, gradient.setName(s"gradient-$iter").persist(storageLevel)))
   }
@@ -190,9 +197,8 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
     val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
     val shrinkageVal = elasticNetParam * regParam * thisIterStepSize
     val regParamL2 = (1.0 - elasticNetParam) * regParam
-    // bias -= thisIterStepSize * biasGrad
-    bias -= thisIterStepSize * (biasGrad + regParamL2 * bias)
-    if (shrinkageVal > 0.0) bias = signum(bias) * max(0.0, abs(bias) - shrinkageVal)
+    val l2StepSize = stepSize / sqrt(iter)
+    bias -= l2StepSize * biasGrad
     dataSet.vertices.leftJoin(gradient) { (_, attr, gradient) =>
       gradient match {
         case Some(grad) =>
@@ -203,8 +209,7 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
             if (grad(i) != 0.0) {
               weight(i) -= thisIterStepSize * (grad(i) + regParamL2 * wd * weight(i))
               if (shrinkageVal > 0.0) {
-                val wi = weight(i)
-                weight(i) = signum(wi) * max(0.0, abs(wi) - wd * shrinkageVal)
+                weight(i) = signum(weight(i)) * max(0.0, abs(weight(i)) - wd * shrinkageVal)
               }
             }
             i += 1
@@ -220,7 +225,7 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
     iter: Int): (Double, VertexRDD[Array[Double]]) = {
     if (useAdaGrad) {
       val rho = math.exp(-math.log(2.0) / halfLife)
-      val (newW0Grad, newW0Sum, delta) = adaGrad(gradientSum, gradient, epsilon, 1.0)
+      val delta = adaGrad(gradientSum, gradient._2, epsilon, 1.0)
       // val (newW0Grad, newW0Sum, delta) = esgd(gradientSum, gradient, epsilon, iter)
       checkpointGradientSum(delta)
       delta.setName(s"delta-$iter").persist(storageLevel).count()
@@ -230,28 +235,28 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
         setName(s"gradient-$iter").persist(storageLevel)
       newGradient.count()
 
-      if (gradientSum != null) gradientSum._2.unpersist(blocking = false)
-      gradientSum = (newW0Sum, delta.mapValues(_._2).setName(s"gradientSum-$iter").persist(storageLevel))
-      gradientSum._2.count()
+      if (gradientSum != null) gradientSum.unpersist(blocking = false)
+      gradientSum = delta.mapValues(_._2).setName(s"gradientSum-$iter").persist(storageLevel)
+      gradientSum.count()
       delta.unpersist(blocking = false)
-      (newW0Grad, newGradient)
+      (gradient._1, newGradient)
     } else {
       gradient
     }
   }
 
   protected def adaGrad(
-    gradientSum: (Double, VertexRDD[Array[Double]]),
-    gradient: (Double, VertexRDD[Array[Double]]),
+    gradientSum: VertexRDD[Array[Double]],
+    gradient: VertexRDD[Array[Double]],
     epsilon: Double,
-    rho: Double): (Double, Double, VertexRDD[(Array[Double], Array[Double])]) = {
+    rho: Double): VertexRDD[(Array[Double], Array[Double])] = {
     val delta = if (gradientSum == null) {
       features.mapValues(t => t.map(x => 0.0))
     }
     else {
-      gradientSum._2
+      gradientSum
     }
-    val newGradSumWithoutW0 = delta.leftJoin(gradient._2) { (_, gradSum, g) =>
+    val newGradSumWithoutW0 = delta.leftJoin(gradient) { (_, gradSum, g) =>
       g match {
         case Some(grad) =>
           val gradLen = grad.length
@@ -264,29 +269,22 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
           (newGrad, newGradSum)
         case _ => (null, gradSum)
       }
-
     }
-    val w0Sum = if (gradientSum == null) 0.0 else gradientSum._1
-    val w0Grad = gradient._1
-
-    val newW0Sum = w0Sum * rho + pow(w0Grad, 2)
-    val newW0Grad = w0Grad / (epsilon + sqrt(newW0Sum))
-
-    (newW0Grad, newW0Sum, newGradSumWithoutW0)
+    newGradSumWithoutW0
   }
 
   protected def esgd(
-    gradientSum: (Double, VertexRDD[Array[Double]]),
-    gradient: (Double, VertexRDD[Array[Double]]),
+    gradientSum: (VertexRDD[Array[Double]]),
+    gradient: (VertexRDD[Array[Double]]),
     epsilon: Double,
-    iter: Int): (Double, Double, VertexRDD[(Array[Double], Array[Double])]) = {
+    iter: Int): (VertexRDD[(Array[Double], Array[Double])]) = {
     val delta = if (gradientSum == null) {
       features.mapValues(t => t.map(x => 0.0))
     }
     else {
-      gradientSum._2
+      gradientSum
     }
-    val newGradSumWithoutW0 = delta.leftJoin(gradient._2) { (_, gradSum, g) =>
+    val newGradSumWithoutW0 = delta.leftJoin(gradient) { (_, gradSum, g) =>
       g match {
         case Some(grad) =>
           val gradLen = grad.length
@@ -301,13 +299,7 @@ private[ml] abstract class MVMPlus extends Serializable with Logging {
       }
 
     }
-    val w0Sum = if (gradientSum == null) 0.0 else gradientSum._1
-    val w0Grad = gradient._1
-
-    val newW0Sum = w0Sum + pow(Utils.random.nextGaussian() * w0Grad, 2)
-    val newW0Grad = w0Grad / (epsilon + sqrt(newW0Sum / iter))
-
-    (newW0Grad, newW0Sum, newGradSumWithoutW0)
+    newGradSumWithoutW0
   }
 
 
@@ -695,12 +687,13 @@ object MVMPlus {
     x: ED,
     arr: VD,
     multi: ED): VD = {
-    val m = new Array[Double](rank)
+    val m = new Array[Double](rank + 1)
     var i = 0
     while (i < rank) {
       m(i) = multi * x * arr(i + viewId * rank)
       i += 1
     }
+    m(m.length - 1) = 1
     m
   }
 
