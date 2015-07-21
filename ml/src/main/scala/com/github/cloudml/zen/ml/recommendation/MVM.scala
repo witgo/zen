@@ -23,6 +23,8 @@ import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.recommendation.MVM._
 import com.github.cloudml.zen.ml.util.SparkUtils._
 import com.github.cloudml.zen.ml.util.{XORShiftRandom, Utils}
+import org.apache.commons.math3.distribution.GammaDistribution
+import org.apache.commons.math3.random.{Well19937c, RandomDataGenerator}
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.impl.{EdgeRDDImpl, GraphImpl}
@@ -188,20 +190,33 @@ private[ml] abstract class MVM extends Serializable with Logging {
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
     val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-    val shrinkageVal = elasticNetParam * regParam * thisIterStepSize
-    val regParamL2 = (1.0 - elasticNetParam) * regParam
+    val alpha = 1e-6
+    val beta = 1e-6
+    val rand = new Well19937c(Utils.random.nextLong())
+    val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))(seqOp = {
+      (arr, weight) =>
+        var i = 0
+        while (i < rank) {
+          val w = weight(i)
+          arr(i) += w.abs
+          arr(i + rank) += pow(w, 2)
+          i += 1
+        }
+        arr
+    }, reduceInterval)
     dataSet.vertices.leftJoin(gradient) { (_, attr, gradient) =>
       gradient match {
         case Some(grad) =>
           val weight = attr
-          val wd = if (useWeightedLambda) weight.last / (numSamples + 1.0) else 1.0
           var i = 0
           while (i < rank) {
             if (grad(i) != 0.0) {
-              weight(i) -= thisIterStepSize * (grad(i) + regParamL2 * wd * weight(i))
-              if (shrinkageVal > 0) {
-                weight(i) = signum(weight(i)) * max(0.0, abs(weight(i)) - wd * shrinkageVal)
-              }
+              val sumOrder2 = dist(i + rank)
+              val sumAbs = dist(i)
+              rand.setSeed(Utils.random.nextLong())
+              val rng = new GammaDistribution(rand, (alpha + sumAbs + 1.0) / 2,
+                (beta + sumOrder2) / 2, 1e-9)
+              weight(i) -= thisIterStepSize * (grad(i) + (1.0 / rng.sample()) * weight(i))
             }
             i += 1
           }
