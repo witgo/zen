@@ -190,9 +190,6 @@ private[ml] abstract class MVM extends Serializable with Logging {
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
     val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-    val alpha = 1e-6
-    val beta = 1e-6
-    val rand = new Well19937c(Utils.random.nextLong())
     val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))(seqOp = {
       (arr, weight) =>
         var i = 0
@@ -204,19 +201,28 @@ private[ml] abstract class MVM extends Serializable with Logging {
         }
         arr
     }, reduceInterval)
-    dataSet.vertices.leftJoin(gradient) { (_, attr, gradient) =>
+    val regL2 = new Array[Double](rank)
+    val alpha = 1.0
+    val beta = 1.0
+    val rand = new Well19937c(Utils.random.nextLong())
+    rand.setSeed(Utils.random.nextLong())
+    val seed = Utils.random.nextLong()
+    regL2.indices.foreach { i =>
+      val shape = (alpha + dist(i) + 1.0) / 2
+      val scale = (beta + dist(i + rank)) / 2
+      val rng = new GammaDistribution(rand, shape, scale)
+      regL2(i) = 1.0 / rng.sample()
+    }
+    dataSet.vertices.leftJoin(gradient) { (vid, attr, gradient) =>
       gradient match {
         case Some(grad) =>
           val weight = attr
           var i = 0
           while (i < rank) {
             if (grad(i) != 0.0) {
-              val sumOrder2 = dist(i + rank)
-              val sumAbs = dist(i)
-              rand.setSeed(Utils.random.nextLong())
-              val rng = new GammaDistribution(rand, (alpha + sumAbs + 1.0) / 2,
-                (beta + sumOrder2) / 2, 1e-9)
-              weight(i) -= thisIterStepSize * (grad(i) + (1.0 / rng.sample()) * weight(i))
+              rand.setSeed(iter * vid + seed)
+              val thisRegL2 = rand.nextGaussian() * sqrt(regL2(i))
+              weight(i) -= thisIterStepSize * (grad(i) + thisRegL2 * weight(i))
             }
             i += 1
           }
