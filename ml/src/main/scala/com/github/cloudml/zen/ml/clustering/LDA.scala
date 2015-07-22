@@ -57,7 +57,7 @@ abstract class LDA private[ml](
   /**
    * Token number in corpus
    */
-  val numTokens = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
+  val numTokens = corpus.edges.map(e => e.attr.length.toDouble).sum().toLong
 
   def setAlpha(alpha: Float): this.type = {
     this.alpha = alpha
@@ -90,9 +90,9 @@ abstract class LDA private[ml](
   @transient private var innerIter = 1
   @transient private var totalTopicCounter: BDV[Count] = collectTotalTopicCounter(corpus)
 
-  private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
+  def termVertices = corpus.vertices.filter(t => !isDocId(t._1))
 
-  private def docVertices = corpus.vertices.filter(t => t._1 < 0)
+  def docVertices = corpus.vertices.filter(t => isDocId(t._1))
 
   private def checkpoint(corpus: Graph[VD, ED]): Unit = {
     val sc = corpus.edges.sparkContext
@@ -213,10 +213,10 @@ abstract class LDA private[ml](
     }.groupByKey().map { case (topic, simTopics) =>
       (topic, simTopics.min)
     }.collect().toMap
-    if (minMap.size > 0) {
+    if (minMap.nonEmpty) {
       corpus = corpus.mapEdges(edges => {
         edges.attr.map { topic =>
-          minMap.get(topic).getOrElse(topic)
+          minMap.getOrElse(topic, topic)
         }
       })
       corpus = updateCounter(corpus, numTopics)
@@ -356,7 +356,7 @@ object LDA {
     useLightLDA: Boolean = false,
     useDBHStrategy: Boolean = false): DistributedLDAModel = {
     require(totalIter > 0, "totalIter is less than 0")
-    val numTopics = computedModel.ttc.size
+    val numTopics = computedModel.ttc.length
     val alpha = computedModel.alpha
     val beta = computedModel.beta
     val broadcastModel = docs.context.broadcast(computedModel)
@@ -397,7 +397,7 @@ object LDA {
     edges.unpersist(blocking = false)
     corpus = if (useDBHStrategy) {
       DBHPartitioner.partitionByDBH[VD, ED](corpus, storageLevel)
-    }else {
+    } else {
       corpus.partitionBy(PartitionStrategy.EdgePartition2D)
     }
     updateCounter(corpus, numTopics)
@@ -444,8 +444,12 @@ object LDA {
   }
 
   // make docId always be negative, so that the doc vertex always be the dest vertex
-  private def genNewDocId(docId: Long): Long = {
+  @inline private[ml] def genNewDocId(docId: Long): Long = {
     -(docId + 1L)
+  }
+
+  @inline private[ml] def isDocId(id: Long): Boolean = {
+    id < 0
   }
 
   private[ml] def sampleSV(
@@ -529,7 +533,7 @@ class FastLDA(
   alphaAS: Float,
   storageLevel: StorageLevel,
   useDBHStrategy: Boolean)
-    extends LDA(corpus, numTopics, numTerms, alpha, beta, alphaAS, storageLevel, useDBHStrategy) {
+  extends LDA(corpus, numTopics, numTerms, alpha, beta, alphaAS, storageLevel, useDBHStrategy) {
   def this(docs: RDD[(DocId, SV)],
     numTopics: Int,
     alpha: Float,
@@ -553,7 +557,7 @@ class FastLDA(
     alpha: Float,
     alphaAS: Float,
     beta: Float): Graph[VD, ED] = {
-    val parts = graph.edges.partitions.size
+    val parts = graph.edges.partitions.length
     val nweGraph = graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
@@ -570,11 +574,11 @@ class FastLDA(
         iter.map {
           triplet =>
             val termId = triplet.srcId
-            val docId = triplet.dstId
+            // val docId = triplet.dstId
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-            for (i <- 0 until topics.length) {
+            for (i <- topics.indices) {
               val currentTopic = topics(i)
               dSparse(totalTopicCounter, termTopicCounter, docTopicCounter, dData,
                 currentTopic, numTokens, numTerms, alpha, alphaAS, beta)
@@ -744,7 +748,7 @@ class LightLDA(
   alphaAS: Float,
   storageLevel: StorageLevel,
   useDBHStrategy: Boolean)
-    extends LDA(corpus, numTopics, numTerms, alpha, beta, alphaAS, storageLevel, useDBHStrategy) {
+  extends LDA(corpus, numTopics, numTerms, alpha, beta, alphaAS, storageLevel, useDBHStrategy) {
   def this(docs: RDD[(Long, SV)],
     numTopics: Int,
     alpha: Float,
@@ -767,7 +771,7 @@ class LightLDA(
     alpha: Float,
     alphaAS: Float,
     beta: Float): Graph[VD, ED] = {
-    val parts = graph.edges.partitions.size
+    val parts = graph.edges.partitions.length
     val nweGraph = graph.mapTriplets(
       (pid, iter) => {
         val gen = new Random(parts * innerIter + pid)
@@ -818,7 +822,7 @@ class LightLDA(
               }
               (lastWSum, lastTable)
             }
-            for (i <- 0 until topics.length) {
+            for (i <- topics.indices) {
               var docProposal = gen.nextDouble() < 0.5
               var maxSampling = 8
               while (maxSampling > 0) {
