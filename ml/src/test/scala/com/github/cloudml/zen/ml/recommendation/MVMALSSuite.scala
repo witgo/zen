@@ -63,7 +63,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     dataSet.count()
     movieLens.unpersist()
 
-    val lambda = 1e-1
+    val lambda = 1e-2
     val numIterations = 600
     val rank = 10
     val views = Array(maxUserId, numFeatures).map(_.toLong)

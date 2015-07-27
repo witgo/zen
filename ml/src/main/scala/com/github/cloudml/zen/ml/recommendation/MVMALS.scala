@@ -177,7 +177,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
           val weight = attr
           var i = 0
           while (i < rank) {
-            if (i == iter % rank) {
+            if (i == iter % rank && iter % views.length == viewId) {
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)
@@ -317,7 +317,7 @@ object MVMALS {
     } ++ edges.map(_.srcId).distinct().map { featureId =>
       // parameter point
       val parms = Array.fill(rank) {
-        1e-2
+        Utils.random.nextDouble() * 1e-2
       }
       (featureId, parms)
     }).repartition(input.partitions.length)
