@@ -190,26 +190,24 @@ private[ml] abstract class MVM extends Serializable with Logging {
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
     val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-    val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))(seqOp = {
-      (arr, weight) =>
-        var i = 0
-        while (i < rank) {
-          val w = weight(i)
-          arr(i) += w.abs
-          arr(i + rank) += pow(w, 2)
-          i += 1
-        }
-        arr
+    val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))({ (arr, weight) =>
+      var i = 0
+      while (i < rank) {
+        val w = weight(i)
+        arr(i) += w.abs
+        arr(i + rank) += pow(w, 2)
+        i += 1
+      }
+      arr
     }, reduceInterval)
     val regL2 = new Array[Double](rank)
     val alpha = 1.0
     val beta = 1.0
-    val rand = new Well19937c(Utils.random.nextLong())
-    rand.setSeed(Utils.random.nextLong())
     val seed = Utils.random.nextLong()
+    val rand = new Well19937c(seed * iter)
     regL2.indices.foreach { i =>
-      val shape = (alpha + dist(i) + 1.0) / 2
-      val scale = (beta + dist(i + rank)) / 2
+      val shape = (alpha + dist(i) + 1.0) / 2.0
+      val scale = (beta + dist(i + rank)) / 2.0
       val rng = new GammaDistribution(rand, shape, scale)
       regL2(i) = 1.0 / rng.sample()
     }
@@ -221,8 +219,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
           while (i < rank) {
             if (grad(i) != 0.0) {
               rand.setSeed(iter * vid + seed)
-              val thisRegL2 = rand.nextGaussian() * sqrt(regL2(i))
-              weight(i) -= thisIterStepSize * (grad(i) + thisRegL2 * weight(i))
+              weight(i) -= thisIterStepSize * grad(i) + rand.nextGaussian() * sqrt(regL2(i))
             }
             i += 1
           }

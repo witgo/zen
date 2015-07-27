@@ -396,7 +396,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
   }
 
-  ignore("movieLens 100k regression") {
+  test("movieLens 100k regression") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
     val checkpointDir = s"$sparkHome/tmp"
@@ -405,23 +405,22 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
       iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
         val Array(userId, movieId, rating, timestamp) = line.split("\t")
-        (userId.toInt, (movieId.toInt, rating.toDouble))
+        (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24))
       }
     }.persist(StorageLevel.MEMORY_AND_DISK)
-    val maxMovieId = movieLens.map(_._2._1).max + 1
     val maxUserId = movieLens.map(_._1).max + 1
-    val numFeatures = maxUserId + maxMovieId
-    val dataSet = movieLens.map { case (userId, (movieId, rating)) =>
-      val sv = BSV.zeros[Double](maxMovieId)
-      sv(movieId) = rating
-      (userId, sv)
-    }.reduceByKey(_ :+= _).flatMap { case (userId, ratings) =>
-      ratings.activeIterator.map { case (movieId, rating) =>
-        val sv = BSV.zeros[Double](numFeatures)
-        sv(userId) = 1.0
-        sv(movieId + maxUserId) = 1.0
-        new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
-      }
+    val maxMovieId = movieLens.map(_._2).max + 1
+    val maxDay = movieLens.map(_._4).max()
+    val minDay = movieLens.map(_._4).min()
+    val day = maxDay - minDay + 1
+    val numFeatures = maxUserId + maxMovieId + day
+
+    val dataSet = movieLens.map { case (userId, movieId, rating, timestamp) =>
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv(timestamp - minDay + maxUserId + maxMovieId) = 1.0
+      new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
     dataSet.count()
     movieLens.unpersist()
@@ -433,7 +432,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val rank = 10
     val useAdaGrad = true
     val useWeightedLambda = true
-    val miniBatchFraction = 1
+    val miniBatchFraction = 0.1
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
@@ -441,19 +440,13 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val fm = new MVMRegression(trainSet, stepSize, Array(maxUserId, numFeatures),
       regParam, 0.0, rank, useAdaGrad, useWeightedLambda, miniBatchFraction)
 
-    //    val fm = new FMRegression(trainSet, stepSize, l2, rank, useAdaGrad,
-    //      miniBatchFraction, StorageLevel.MEMORY_AND_DISK)
-
-    //    val fm = new BSFMRegression(trainSet, stepSize, Array(maxUserId, numFeatures),
-    //      l2, rank, useAdaGrad, miniBatchFraction)
-
     fm.run(numIterations)
     val model = fm.saveModel()
     println(f"Test loss: ${model.loss(testSet)}%1.4f")
 
   }
 
-  test("movieLens 100k binary classification") {
+  ignore("movieLens 100k binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
     val checkpointDir = s"$sparkHome/tmp"
