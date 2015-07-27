@@ -31,7 +31,7 @@ import org.scalatest.{Matchers, FunSuite}
 
 class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
 
-  ignore("movieLens 100k regression") {
+  test("movieLens 100k regression") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
 
     import com.github.cloudml.zen.ml.recommendation._
@@ -78,7 +78,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
 
   }
 
-  test("1 regression") {
+  ignore("1 regression") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
 
     import com.github.cloudml.zen.ml.recommendation._

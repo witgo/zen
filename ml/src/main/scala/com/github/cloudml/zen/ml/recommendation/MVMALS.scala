@@ -163,9 +163,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
         val m = backwardInterval(rank, viewId, x, arr, arr.last)
         ctx.sendToSrc(m)
       }
-    }, reduceInterval, TripletFields.All).mapValues { ws =>
-      ws.map(_ / 1.0)
-    }.setName(s"gradient-$iter").persist(storageLevel)
+    }, reduceInterval, TripletFields.All).setName(s"gradient-$iter").persist(storageLevel)
     (thisNumSamples, costSum, gradient)
   }
 
@@ -177,20 +175,20 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       gradient match {
         case Some(grad) =>
           val weight = attr
-          println(s"$featureId=> ${weight.mkString(" ")}")
-          if (iter % 7 == featureId) {
-            var i = 0
-            while (i < rank) {
+          var i = 0
+          while (i < rank) {
+            if (i == iter % rank) {
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)
               weight(i) = (w * h2 + he) / (h2 + lambda)
-              if (Utils.random.nextDouble() < 1) {
-                println(s"he: $he => h2: $h2 => w: $w => weight: ${weight(i)} => lambda:$lambda")
+              if (Utils.random.nextDouble() < 1e-3) {
+                println(s"he: $he => h2: $h2 => lambda:$lambda => old weight: $w => new weight: ${weight(i)} ")
               }
-              i += 1
             }
+            i += 1
           }
+
           weight
         case None => attr
 
@@ -244,14 +242,10 @@ class MVMALSRegression(
         case Some(m) =>
           assert(data.length == 1)
           val y = data.head
-          println(m.mkString(" "))
           val arr = sumInterval(rank, m)
-          println(arr.mkString(" "))
-
           val perd = arr.last
           // assert(abs(perd -  predict(m)) < 1e-4)
           val diff = y - perd
-          println(s"diff: $diff")
           arr(arr.length - 1) = diff
           arr
         case _ => data
@@ -425,7 +419,6 @@ object MVMALS {
     x: ED,
     arr: VD,
     multi: ED): VD = {
-    println(s"x:$x => ${arr.mkString(" ")} => $multi => $viewId")
     val m = new Array[Double](rank * 2)
     var i = 0
     while (i < rank) {
@@ -434,7 +427,6 @@ object MVMALS {
       m(i + rank) += pow(hx, 2)
       i += 1
     }
-    println(s"m: ${m.mkString(" ")}")
     m
   }
 
