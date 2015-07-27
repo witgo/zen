@@ -65,7 +65,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
 
     val lambda = 1e-2
     val numIterations = 600
-    val rank = 10
+    val rank = 5
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val miniBatchFraction = 1
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.4, 0.6))

@@ -177,7 +177,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
           val weight = attr
           var i = 0
           while (i < rank) {
-            if (i == iter % rank && iter % views.length == viewId) {
+            if (i == iter % rank && viewId == iter % views.length) {
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)
