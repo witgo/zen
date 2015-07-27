@@ -432,7 +432,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val rank = 10
     val useAdaGrad = true
     val useWeightedLambda = true
-    val miniBatchFraction = 0.1
+    val miniBatchFraction = 1.0
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
