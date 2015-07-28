@@ -170,7 +170,6 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   // Updater for CD problems
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
-    val genViewId = Utils.random.nextInt(views.length)
     dataSet.vertices.leftJoin(gradient) { (featureId, attr, gradient) =>
       val viewId = featureId2viewId(featureId, views)
       gradient match {
@@ -178,7 +177,8 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
           val weight = attr
           var i = 0
           while (i < rank) {
-            if (i == iter % rank && viewId == genViewId) {
+            if (i == iter % rank && viewId == (iter / rank) % views.length) {
+              // if (i == (iter / views.length) % rank && viewId == iter % views.length) {
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)

@@ -63,12 +63,12 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     dataSet.count()
     movieLens.unpersist()
 
-    val lambda = 1e-2
+    val lambda = 1e-1
     val numIterations = 600
-    val rank = 5
+    val rank = 10
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val miniBatchFraction = 1
-    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.4, 0.6))
+    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.9, 0.1))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     val fm = new MVMALSRegression(trainSet, lambda, views, rank, miniBatchFraction)
