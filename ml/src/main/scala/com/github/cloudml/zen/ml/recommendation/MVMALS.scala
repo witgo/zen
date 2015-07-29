@@ -87,13 +87,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
 
   def storageLevel: StorageLevel
 
-  def miniBatchFraction: Double
-
   def useWeightedLambda: Boolean
-
-  protected[ml] def mask: Int = {
-    max(1 / miniBatchFraction, 1).toInt
-  }
 
   def samples: VertexRDD[VD] = {
     dataSet.vertices.filter(t => t._1 < 0)
@@ -117,7 +111,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
+      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -133,17 +127,12 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   }
 
   protected[ml] def forward(iter: Int): VertexRDD[Array[Double]] = {
-    val mod = mask
-    val random = genRandom(mod, iter)
-    val seed = random.nextLong()
     dataSet.aggregateMessages[Array[Double]](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
       val viewId = featureId2viewId(featureId, views)
-      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
-        val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
-        ctx.sendToDst(result)
-      }
+      val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
+      ctx.sendToDst(result)
     }, reduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
   }
 
@@ -154,19 +143,14 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   protected def backward(
     multi: VertexRDD[VD],
     iter: Int): VertexRDD[VD] = {
-    val mod = mask
-    val random = genRandom(mod, iter)
-    val seed = random.nextLong()
     GraphImpl.fromExistingRDDs(multi, edges).aggregateMessages[VD](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
-      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
-        val x = ctx.attr
-        val arr = ctx.dstAttr
-        val viewId = featureId2viewId(featureId, views)
-        val m = backwardInterval(rank, viewId, x, arr, arr.last)
-        ctx.sendToSrc(m)
-      }
+      val x = ctx.attr
+      val arr = ctx.dstAttr
+      val viewId = featureId2viewId(featureId, views)
+      val m = backwardInterval(rank, viewId, x, arr, arr.last)
+      ctx.sendToSrc(m)
     }, reduceInterval, TripletFields.Dst).setName(s"delta-$iter").persist(storageLevel)
   }
 
@@ -218,7 +202,6 @@ class MVMALSRegression(
   val rank: Int,
   val lambda: Double,
   val useWeightedLambda: Boolean,
-  val miniBatchFraction: Double,
   val storageLevel: StorageLevel) extends MVMALS {
 
   def this(
@@ -227,10 +210,9 @@ class MVMALSRegression(
     rank: Int = 20,
     lambda: Double = 5e-2,
     useWeightedLambda: Boolean = true,
-    miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK) {
     this(initializeDataSet(input, views, rank, storageLevel), views, rank, lambda,
-      useWeightedLambda, miniBatchFraction, storageLevel)
+      useWeightedLambda, storageLevel)
   }
 
   setDataSet(_dataSet)
@@ -293,13 +275,12 @@ object MVMALS {
     rank: Int,
     lambda: Double,
     useWeightedLambda: Boolean = true,
-    miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK): MVMModel = {
     val data = input.map { case (id, labeledPoint) =>
       assert(id >= 0.0, s"sampleId $id less than 0")
       (id, labeledPoint)
     }
-    val lfm = new MVMALSRegression(data, views, rank, lambda, useWeightedLambda, miniBatchFraction, storageLevel)
+    val lfm = new MVMALSRegression(data, views, rank, lambda, useWeightedLambda, storageLevel)
     lfm.run(numIterations)
     val model = lfm.saveModel()
     model
@@ -381,22 +362,6 @@ object MVMALS {
 
   @inline private[ml] def isSampleId(id: Long): Boolean = {
     id < 0
-  }
-
-  @inline private[ml] def isSampled(
-    random: JavaRandom,
-    seed: Long,
-    sampleId: Long,
-    iter: Int,
-    mod: Int): Boolean = {
-    random.setSeed(seed * sampleId)
-    random.nextInt(mod) == iter % mod
-  }
-
-  @inline private[ml] def genRandom(mod: Int, iter: Int): JavaRandom = {
-    val random: JavaRandom = new XORShiftRandom()
-    random.setSeed(17425170 - iter / mod)
-    random
   }
 
   /**

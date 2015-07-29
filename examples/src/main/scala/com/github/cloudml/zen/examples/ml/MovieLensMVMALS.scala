@@ -110,7 +110,7 @@ object MovieLensMVMALS extends Logging {
     else {
       MovieLensUtils.genSamplesWithTime(sc, input, numPartitions, storageLevel)
     }
-    val lfm = new MVMALSRegression(trainSet, views, rank, regular, useWeightedLambda, 1.0, storageLevel)
+    val lfm = new MVMALSRegression(trainSet, views, rank, regular, useWeightedLambda, storageLevel)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {

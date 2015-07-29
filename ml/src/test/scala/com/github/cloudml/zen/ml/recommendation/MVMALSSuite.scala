@@ -64,15 +64,14 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val lambda = 1e-2
-    val numIterations = 50
-    val rank = 10
+    val numIterations = 200
+    val rank = 20
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val miniBatchFraction = 1.0
     val useWeightedLambda = false
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
-    val fm = new MVMALSRegression(trainSet, views, rank, lambda, useWeightedLambda, miniBatchFraction)
+    val fm = new MVMALSRegression(trainSet, views, rank, lambda, useWeightedLambda)
     fm.run(numIterations)
     val model = fm.saveModel()
     println(f"Test loss: ${model.loss(testSet)}%1.4f")
@@ -110,7 +109,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val miniBatchFraction = 1
 
-    val fm = new MVMALSRegression(dataSet, views, rank, lambda, false, miniBatchFraction)
+    val fm = new MVMALSRegression(dataSet, views, rank, lambda, false)
     fm.run(numIterations)
   }
 }
