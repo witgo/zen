@@ -34,6 +34,7 @@ object MovieLensMVMALS extends Logging {
     numPartitions: Int = -1,
     regular: Double = 0.05,
     rank: Int = 20,
+    useWeightedLambda: Boolean = false,
     useSVDPlusPlus: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
 
@@ -57,6 +58,9 @@ object MovieLensMVMALS extends Logging {
         .text(
           s"L2 regularization, default: ${defaultParams.regular}")
         .action((x, c) => c.copy(regular = x))
+      opt[Unit]("weightedLambda")
+        .text("use weighted lambda regularization")
+        .action((_, c) => c.copy(useWeightedLambda = true))
       opt[Unit]("svdPlusPlus")
         .text("use SVD++")
         .action((_, c) => c.copy(useSVDPlusPlus = true))
@@ -88,7 +92,8 @@ object MovieLensMVMALS extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, regular, rank, useSVDPlusPlus, kryo) = params
+    val Params(input, out, numIterations, numPartitions, regular, rank,
+    useWeightedLambda, useSVDPlusPlus, kryo) = params
     val storageLevel = if (useSVDPlusPlus) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
     val checkpointDir = s"$out/checkpoint"
     val conf = new SparkConf().setAppName(s"MVMALS with $params")
@@ -105,7 +110,7 @@ object MovieLensMVMALS extends Logging {
     else {
       MovieLensUtils.genSamplesWithTime(sc, input, numPartitions, storageLevel)
     }
-    val lfm = new MVMALSRegression(trainSet, regular, views, rank, 1, storageLevel)
+    val lfm = new MVMALSRegression(trainSet, views, rank, regular, useWeightedLambda, 1.0, storageLevel)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {

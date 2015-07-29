@@ -17,15 +17,15 @@
 
 package com.github.cloudml.zen.ml.recommendation
 
+import java.util.{Random => JavaRandom}
+
 import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.recommendation.MVMALS._
 import com.github.cloudml.zen.ml.util.SparkUtils._
-import com.github.cloudml.zen.ml.util.Utils
-import org.apache.commons.math3.primes.Primes
-import org.apache.spark.{SparkContext, Logging}
+import com.github.cloudml.zen.ml.util.{Utils, XORShiftRandom}
+import org.apache.spark.Logging
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.impl.{EdgeRDDImpl, GraphImpl}
-import org.apache.spark.mllib.linalg.{Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
@@ -58,7 +58,6 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   @transient protected var vertices: VertexRDD[VD] = null
   @transient protected var edges: EdgeRDD[ED] = null
   @transient private var innerIter = 1
-  @transient private var primes = Primes.nextPrime(117)
 
   def setDataSet(data: Graph[VD, ED]): this.type = {
     vertices = data.vertices
@@ -76,6 +75,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
     dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
     numFeatures = features.count()
     numSamples = samples.count()
+    logInfo(s"$numFeatures features, $numSamples samples in the data")
     this
   }
 
@@ -88,6 +88,8 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   def storageLevel: StorageLevel
 
   def miniBatchFraction: Double
+
+  def useWeightedLambda: Boolean
 
   protected[ml] def mask: Int = {
     max(1 / miniBatchFraction, 1).toInt
@@ -104,18 +106,18 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   def run(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
       logInfo(s"Start train (Iteration $iter/$iterations)")
-      primes = Primes.nextPrime(primes + 1)
       val startedAt = System.nanoTime()
       val previousVertices = vertices
       val margin = forward(iter)
-      val (thisNumSamples, costSum, delta) = backward(margin, iter)
+      val (_, costSum, thisMulti) = multiplier(margin, iter)
+      multi = thisMulti
+      val delta = backward(multi, iter)
       vertices = updateWeight(delta, iter)
       checkpointVertices()
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      val rmse = sqrt(costSum / thisNumSamples)
-      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $rmse")
+      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -127,18 +129,18 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   }
 
   def saveModel(): MVMModel = {
-    new MVMModel(rank, views, false, features)
+    new MVMModel(rank, views, false, features.mapValues(arr => arr.slice(0, arr.length - 1)))
   }
 
   protected[ml] def forward(iter: Int): VertexRDD[Array[Double]] = {
     val mod = mask
-    val thisMask = iter % mod
-    val thisPrimes = primes
+    val random = genRandom(mod, iter)
+    val seed = random.nextLong()
     dataSet.aggregateMessages[Array[Double]](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
       val viewId = featureId2viewId(featureId, views)
-      if (mod == 1 || ((sampleId * thisPrimes) % mod) + thisMask == 0) {
+      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
         val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
         ctx.sendToDst(result)
       }
@@ -149,42 +151,46 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
 
   protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD])
 
-  protected def backward(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
-    val (thisNumSamples, costSum, thisMulti) = multiplier(q, iter)
-    multi = thisMulti
-    val sampledArrayLen = rank * views.length + 1
-    val gradient = GraphImpl.fromExistingRDDs(multi, edges).aggregateMessages[VD](ctx => {
-      // val sampleId = ctx.dstId
+  protected def backward(
+    multi: VertexRDD[VD],
+    iter: Int): VertexRDD[VD] = {
+    val mod = mask
+    val random = genRandom(mod, iter)
+    val seed = random.nextLong()
+    GraphImpl.fromExistingRDDs(multi, edges).aggregateMessages[VD](ctx => {
+      val sampleId = ctx.dstId
       val featureId = ctx.srcId
-      if (ctx.dstAttr.length == sampledArrayLen) {
+      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
         val x = ctx.attr
         val arr = ctx.dstAttr
         val viewId = featureId2viewId(featureId, views)
         val m = backwardInterval(rank, viewId, x, arr, arr.last)
         ctx.sendToSrc(m)
       }
-    }, reduceInterval, TripletFields.All).setName(s"gradient-$iter").persist(storageLevel)
-    (thisNumSamples, costSum, gradient)
+    }, reduceInterval, TripletFields.Dst).setName(s"delta-$iter").persist(storageLevel)
   }
 
   // Updater for CD problems
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
-    val genViewId = Utils.random.nextInt(views.length)
+    // val thisViewId = Utils.random.nextInt(views.length)
+    // val thisViewId = (iter / rank) % views.length
+    val thisViewId = iter % views.length
     dataSet.vertices.leftJoin(delta) { (featureId, attr, gradient) =>
       gradient match {
         case Some(grad) =>
           val weight = attr
+          assert(weight.length == rank + 1)
           val viewId = featureId2viewId(featureId, views)
           var i = 0
           while (i < rank) {
-            // if (i == iter % rank && viewId == genViewId) {
-            // if (i == iter % rank && viewId == (iter / rank) % views.length) {
-            if (i == (iter / views.length) % rank && viewId == iter % views.length) {
+            // if (i == iter % rank && viewId == thisViewId) {
+            if (i == (iter / views.length) % rank && viewId == thisViewId) {
+              val wd = if (useWeightedLambda) weight.last / (numSamples + 1.0) else 1.0
               val h2 = grad(i + rank)
               val he = grad(i)
               val w = weight(i)
-              weight(i) = (w * h2 + he) / (h2 + lambda)
-              if (Utils.random.nextDouble() < 1e-3) {
+              weight(i) = (w * h2 + he) / (h2 + wd * lambda)
+              if (Utils.random.nextDouble() < 1e-4) {
                 // println(s"he: $he => h2: $h2 => lambda:$lambda => old weight: $w => new weight: ${weight(i)} ")
               }
             }
@@ -203,24 +209,28 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       vertices.checkpoint()
     }
   }
+
 }
 
 class MVMALSRegression(
   @transient _dataSet: Graph[VD, ED],
-  val lambda: Double,
   val views: Array[Long],
   val rank: Int,
+  val lambda: Double,
+  val useWeightedLambda: Boolean,
   val miniBatchFraction: Double,
   val storageLevel: StorageLevel) extends MVMALS {
 
   def this(
     input: RDD[(VertexId, LabeledPoint)],
-    lambda: Double = 1e-2,
     views: Array[Long],
     rank: Int = 20,
+    lambda: Double = 5e-2,
+    useWeightedLambda: Boolean = true,
     miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK) {
-    this(initializeDataSet(input, views, rank, storageLevel), lambda, views, rank, miniBatchFraction, storageLevel)
+    this(initializeDataSet(input, views, rank, storageLevel), views, rank, lambda,
+      useWeightedLambda, miniBatchFraction, storageLevel)
   }
 
   setDataSet(_dataSet)
@@ -238,25 +248,27 @@ class MVMALSRegression(
   }
 
   override protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
+    val accNumSamples = q.sparkContext.accumulator(1L)
+    val accLossSum = q.sparkContext.accumulator(0.0)
     val multi = dataSet.vertices.leftJoin(q) { (vid, data, deg) =>
       deg match {
         case Some(m) =>
           assert(data.length == 1)
           val y = data.head
           val arr = sumInterval(rank, m)
-          val perd = arr.last
-          // assert(abs(perd -  predict(m)) < 1e-4)
-          val diff = y - perd
+          // assert(abs(arr.last -  predict(m)) < 1e-6)
+          val diff = y - arr.last
+          accLossSum += pow(diff, 2)
+          accNumSamples += 1L
           arr(arr.length - 1) = diff
           arr
         case _ => data
       }
-    }
-    multi.setName(s"multiplier-$iter").persist(storageLevel)
-    val Array(numSamples, costSum) = multi.filter(t => t._2.length == rank * views.length + 1).map { t =>
-      Array(1D, pow(t._2.last, 2))
-    }.reduce(reduceInterval)
-    (numSamples.toLong, costSum, multi)
+    }.setName(s"multiplier-$iter").persist(storageLevel)
+    multi.count()
+    val numSamples = accNumSamples.value
+    val costSum = accLossSum.value
+    (numSamples.toLong, sqrt(costSum / numSamples), multi)
   }
 }
 
@@ -277,16 +289,17 @@ object MVMALS {
   def trainRegression(
     input: RDD[(Long, LabeledPoint)],
     numIterations: Int,
-    lambda: Double,
     views: Array[Long],
     rank: Int,
+    lambda: Double,
+    useWeightedLambda: Boolean = true,
     miniBatchFraction: Double = 1.0,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK): MVMModel = {
     val data = input.map { case (id, labeledPoint) =>
       assert(id >= 0.0, s"sampleId $id less than 0")
       (id, labeledPoint)
     }
-    val lfm = new MVMALSRegression(data, lambda, views, rank, miniBatchFraction, storageLevel)
+    val lfm = new MVMALSRegression(data, views, rank, lambda, useWeightedLambda, miniBatchFraction, storageLevel)
     lfm.run(numIterations)
     val model = lfm.saveModel()
     model
@@ -310,18 +323,28 @@ object MVMALS {
     }.persist(storageLevel)
     edges.count()
 
+    val inDegrees = edges.map(e => (e.srcId, 1L)).reduceByKey(_ + _).map {
+      case (featureId, deg) =>
+        (featureId, deg)
+    }
+
+    val features = edges.map(_.srcId).distinct().map { featureId =>
+      // parameter point
+      val parms = Array.fill(rank + 1) {
+        Utils.random.nextGaussian() * 1e-2
+      }
+      (featureId, parms)
+    }.join(inDegrees).map { case (featureId, (parms, deg)) =>
+      parms(parms.length - 1) = deg
+      (featureId, parms)
+    }
+
     val vertices = (input.map { case (sampleId, labelPoint) =>
       val newId = newSampleId(sampleId)
       val label = Array(labelPoint.label)
       // label point
       (newId, label)
-    } ++ edges.map(_.srcId).distinct().map { featureId =>
-      // parameter point
-      val parms = Array.fill(rank) {
-        Utils.random.nextDouble() * 1e-2
-      }
-      (featureId, parms)
-    }).repartition(input.partitions.length)
+    } ++ features).repartition(input.partitions.length)
     vertices.persist(storageLevel)
     vertices.count()
 
@@ -352,8 +375,28 @@ object MVMALS {
     viewId.toInt
   }
 
-  private[ml] def newSampleId(id: Long): VertexId = {
+  @inline private[ml] def newSampleId(id: Long): VertexId = {
     -(id + 1L)
+  }
+
+  @inline private[ml] def isSampleId(id: Long): Boolean = {
+    id < 0
+  }
+
+  @inline private[ml] def isSampled(
+    random: JavaRandom,
+    seed: Long,
+    sampleId: Long,
+    iter: Int,
+    mod: Int): Boolean = {
+    random.setSeed(seed * sampleId)
+    random.nextInt(mod) == iter % mod
+  }
+
+  @inline private[ml] def genRandom(mod: Int, iter: Int): JavaRandom = {
+    val random: JavaRandom = new XORShiftRandom()
+    random.setSeed(17425170 - iter / mod)
+    random
   }
 
   /**

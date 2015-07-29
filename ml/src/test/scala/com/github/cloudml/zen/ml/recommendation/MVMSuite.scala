@@ -426,7 +426,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val stepSize = 0.1
-    val numIterations = 200
+    val numIterations = 45
     val regParam = 0.05
     val l2 = (regParam, regParam, regParam)
     val rank = 10

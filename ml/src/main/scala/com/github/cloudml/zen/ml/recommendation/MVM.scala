@@ -135,7 +135,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
+      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -190,7 +190,8 @@ private[ml] abstract class MVM extends Serializable with Logging {
     }, reduceInterval, TripletFields.Dst).setName(s"backward-$iter").persist(storageLevel)
     val gradient = arr.mapValues { a =>
       val deg = a.last
-      a.slice(0, rank).map(_ / deg)
+      // a.slice(0, rank).map(_ / deg)
+      a.slice(0, rank).map(_ / thisNumSamples)
     }.setName(s"gradient-$iter").persist(storageLevel)
     val hx2 = arr.mapValues { a =>
       a.slice(rank, 2 * rank)
@@ -235,26 +236,29 @@ private[ml] abstract class MVM extends Serializable with Logging {
   }
 
   def drawLambda(iter: Int): VD = {
-    val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))({ (arr, weight) =>
+    val dist = features.aggregate(new Array[Double](views.length * 2 * rank))({ case (arr, (featureId, weight)) =>
+      val viewId = featureId2viewId(featureId, views)
       var i = 0
       while (i < rank) {
         val w = weight(i)
-        arr(i) += w.abs
-        arr(i + rank) += pow(w, 2)
+        arr(i + viewId * 2 * rank) += w.abs
+        arr(i + rank + viewId * 2 * rank) += pow(w, 2)
         i += 1
       }
       arr
     }, reduceInterval)
-    val lambdaW = new Array[Double](rank)
+    val lambdaW = new Array[Double](views.length * rank)
     val alpha = 1.0
     val beta = 1.0
     val seed = Utils.random.nextLong()
     val rand = new Well19937c(seed * iter)
-    lambdaW.indices.foreach { i =>
-      val shape = (alpha + dist(i) + 1.0) / 2.0
-      val scale = (beta + dist(i + rank)) / 2.0
-      val rng = new GammaDistribution(rand, shape, scale)
-      lambdaW(i) = rng.sample()
+    for (viewId <- views.indices) {
+      for (i <- 0 until rank) {
+        val shape = (alpha + dist(i + viewId * 2 * rank) + 1.0) / 2.0
+        val scale = (beta + dist(i + rank + viewId * 2 * rank)) / 2.0
+        val rng = new GammaDistribution(rand, shape, scale)
+        lambdaW(i + viewId * rank) = rng.sample()
+      }
     }
     lambdaW
   }
@@ -264,13 +268,12 @@ private[ml] abstract class MVM extends Serializable with Logging {
     alpha: Double,
     thisNumSamples: Long,
     iter: Int): VertexRDD[VD] = {
-    hx2.mapValues { h =>
-      assert(h.length >= rank)
-      assert(lambda.length == rank)
+    hx2.mapValues { (vid, h2) =>
+      val viewId = featureId2viewId(vid, views)
       val arr = new Array[Double](rank)
       var i = 0
       while (i < rank) {
-        arr(i) = sqrt(1.0 / (alpha * h(i) + lambda(i)))
+        arr(i) = sqrt(1.0 / (alpha * h2(i) + lambda(i + viewId * rank)))
         i += 1
       }
       arr
