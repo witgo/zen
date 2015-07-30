@@ -63,6 +63,19 @@ private[ml] abstract class MVM extends Serializable with Logging {
   @transient protected var edges: EdgeRDD[ED] = null
   @transient private var innerIter = 1
 
+  protected val alpha_0 = 1.0
+  protected val gamma_0 = 1.0
+  protected val beta_0 = 1.0
+  protected val mu_0 = 0.0
+  // new Array[Double](views.length * rank)
+  protected val mu = Array.fill(views.length * rank) {
+    Utils.random.nextDouble() * 1e-2
+  }
+
+  protected val lambda = Array.fill(views.length * rank) {
+    Utils.random.nextDouble() * 1e-2
+  }
+
   def setDataSet(data: Graph[VD, ED]): this.type = {
     vertices = data.vertices
     edges = data.edges.asInstanceOf[EdgeRDDImpl[ED, _]].mapEdgePartitions { (pid, part) =>
@@ -125,17 +138,17 @@ private[ml] abstract class MVM extends Serializable with Logging {
       val margin = forward(iter)
       val (thisNumSamples, costSum, thisMulti) = multiplier(margin, iter)
       multi = thisMulti
-      val lambda = drawLambda(iter)
-      val alpha = drawAlpha(multi.filter(t => isSampleId(t._1)).mapValues(_.last), iter)
+      drawLambda(iter)
+      val alpha = drawAlpha(multi, iter)
       var (gradient, hx2) = backward(multi, thisNumSamples, iter)
-      val sigma = drawSigma(hx2, lambda, alpha, thisNumSamples, iter)
+      val sigma = drawSigma(hx2, alpha, iter)
       gradient = updateGradientSum(gradient, iter)
       vertices = updateWeight(gradient, sigma, iter)
       checkpointVertices()
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
+      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -190,8 +203,8 @@ private[ml] abstract class MVM extends Serializable with Logging {
     }, reduceInterval, TripletFields.Dst).setName(s"backward-$iter").persist(storageLevel)
     val gradient = arr.mapValues { a =>
       val deg = a.last
-      // a.slice(0, rank).map(_ / deg)
-      a.slice(0, rank).map(_ / thisNumSamples)
+      a.slice(0, rank).map(_ / deg)
+      // a.slice(0, rank).map(_ / thisNumSamples)
     }.setName(s"gradient-$iter").persist(storageLevel)
     val hx2 = arr.mapValues { a =>
       a.slice(rank, 2 * rank)
@@ -208,7 +221,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
     sigma: VertexRDD[VD],
     iter: Int): VertexRDD[VD] = {
     val tis = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-    val seed = Utils.random.nextLong()
+    val seed = Utils.random.nextInt()
     val rand = new Well19937c(seed * iter)
     dataSet.vertices.leftJoin(delta.join(sigma)) { (vid, attr, gradient) =>
       gradient match {
@@ -216,7 +229,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
           val weight = attr
           var i = 0
           while (i < rank) {
-            rand.setSeed(iter * vid + seed)
+            rand.setSeed(Array(iter, vid.toInt, seed))
             weight(i) -= tis * grad(i) + rand.nextGaussian() * reg(i)
             i += 1
           }
@@ -226,58 +239,74 @@ private[ml] abstract class MVM extends Serializable with Logging {
     }.setName(s"vertices-$iter").persist(storageLevel)
   }
 
-  def drawAlpha(e: VertexRDD[Double], iter: Int): Double = {
+  def drawLambda(iter: Int): Unit = {
+    val viewsSize = views.length
+    val rankIndices = 0 until rank
+    val dist = features.aggregate(new Array[Double](viewsSize * (rank + 1)))({ case (arr, (featureId, weight)) =>
+      val viewId = featureId2viewId(featureId, views)
+      for (rankId <- rankIndices) {
+        arr(rankId + viewId * rank) += pow(weight(rankId) - mu(rankId + viewId * rank), 2)
+      }
+      arr(viewsSize * rank + viewId) += 1
+      arr
+    }, reduceInterval)
+    val seed = Utils.random.nextInt()
+    val rand = new Well19937c(Array(seed, iter))
+    for (viewId <- views.indices) {
+      for (rankId <- rankIndices) {
+        val shape = (alpha_0 + dist(viewsSize * rank + viewId) + 1.0) / 2.0
+        val scale = (beta_0 * pow(mu(rankId + viewId * rank) - mu_0, 2) + gamma_0 + dist(rankId + viewId * rank)) / 2.0
+        val rng = new GammaDistribution(rand, shape, scale)
+        lambda(rankId + viewId * rank) = rng.sample()
+      }
+    }
+  }
+
+  def drawMu(iter: Int): Unit = {
+    val viewsSize = views.length
+    val rankIndices = 0 until rank
+    val dist = features.aggregate(new Array[Double](viewsSize * (rank + 1)))({ case (arr, (featureId, weight)) =>
+      val viewId = featureId2viewId(featureId, views)
+      for (rankId <- rankIndices) {
+        arr(rankId + viewId * rank) += weight(rankId)
+      }
+      arr(viewsSize * rank + viewId) += 1
+      arr
+    }, reduceInterval)
+    for (viewId <- views.indices) {
+      for (rankId <- rankIndices) {
+        val mu_sigma = 1.0 / ((dist(viewsSize * rank + viewId) + beta_0) * lambda(rankId + viewId * rank))
+        val mu_mean = (dist(rankId + viewId * rank) + beta_0 * mu_0) / (dist(viewsSize * rank + viewId) + beta_0)
+        mu(rankId + viewId * rank) = mu_mean + Utils.random.nextGaussian() * sqrt(mu_sigma)
+      }
+    }
+  }
+
+  def drawSigma(
+    hx2: VertexRDD[VD],
+    alpha: Double,
+    iter: Int): VertexRDD[VD] = {
+    val rankIndices = 0 until rank
+    hx2.mapValues { (vid, h2) =>
+      val viewId = featureId2viewId(vid, views)
+      val arr = new Array[Double](rank)
+      for (rankId <- rankIndices) {
+        arr(rankId) = 1.0 / (alpha * h2(rankId) + lambda(rankId + viewId * rank))
+      }
+      arr
+    }
+  }
+
+  def drawAlpha(
+    multi: VertexRDD[VD],
+    iter: Int): Double = {
+    val e = multi.filter(t => isSampleId(t._1)).mapValues(_.last)
     val shape = (1 + numSamples) / 2
     val scale = e.map(t => pow(t._2, 2)).sum() / 2
     val seed = Utils.random.nextLong()
     val rand = new Well19937c(seed * iter)
     val rng = new GammaDistribution(rand, shape, scale)
     rng.sample()
-  }
-
-  def drawLambda(iter: Int): VD = {
-    val dist = features.aggregate(new Array[Double](views.length * 2 * rank))({ case (arr, (featureId, weight)) =>
-      val viewId = featureId2viewId(featureId, views)
-      var i = 0
-      while (i < rank) {
-        val w = weight(i)
-        arr(i + viewId * 2 * rank) += w.abs
-        arr(i + rank + viewId * 2 * rank) += pow(w, 2)
-        i += 1
-      }
-      arr
-    }, reduceInterval)
-    val lambdaW = new Array[Double](views.length * rank)
-    val alpha = 1.0
-    val beta = 1.0
-    val seed = Utils.random.nextLong()
-    val rand = new Well19937c(seed * iter)
-    for (viewId <- views.indices) {
-      for (i <- 0 until rank) {
-        val shape = (alpha + dist(i + viewId * 2 * rank) + 1.0) / 2.0
-        val scale = (beta + dist(i + rank + viewId * 2 * rank)) / 2.0
-        val rng = new GammaDistribution(rand, shape, scale)
-        lambdaW(i + viewId * rank) = rng.sample()
-      }
-    }
-    lambdaW
-  }
-
-  def drawSigma(
-    hx2: VertexRDD[VD], lambda: VD,
-    alpha: Double,
-    thisNumSamples: Long,
-    iter: Int): VertexRDD[VD] = {
-    hx2.mapValues { (vid, h2) =>
-      val viewId = featureId2viewId(vid, views)
-      val arr = new Array[Double](rank)
-      var i = 0
-      while (i < rank) {
-        arr(i) = sqrt(1.0 / (alpha * h2(i) + lambda(i + viewId * rank)))
-        i += 1
-      }
-      arr
-    }
   }
 
   protected def updateGradientSum(
