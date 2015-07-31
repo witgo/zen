@@ -25,6 +25,7 @@ import org.apache.spark.mllib.util.MLUtils
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum, Vector => BV}
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV, SparseVector => SSV}
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SQLContext
 import org.apache.spark.storage.StorageLevel
 
 import org.scalatest.{Matchers, FunSuite}
@@ -47,16 +48,20 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     }.persist(StorageLevel.MEMORY_AND_DISK)
     val maxMovieId = movieLens.map(_._2._1).max + 1
     val maxUserId = movieLens.map(_._1).max + 1
-    val numFeatures = maxUserId + maxMovieId
+    val numFeatures = maxUserId + maxMovieId * 2
     val dataSet = movieLens.map { case (userId, (movieId, rating)) =>
       val sv = BSV.zeros[Double](maxMovieId)
       sv(movieId) = rating
       (userId, sv)
     }.reduceByKey(_ :+= _).flatMap { case (userId, ratings) =>
+      val activeSize = ratings.activeSize
       ratings.activeIterator.map { case (movieId, rating) =>
         val sv = BSV.zeros[Double](numFeatures)
         sv(userId) = 1.0
         sv(movieId + maxUserId) = 1.0
+        ratings.activeKeysIterator.foreach { mId =>
+          sv(maxMovieId + maxUserId + mId) = 1.0 / math.sqrt(activeSize)
+        }
         new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
       }
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
@@ -73,6 +78,11 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     fm.run(numIterations)
     val model = fm.saveModel()
     println(f"Test loss: ${model.loss(testSet)}%1.4f")
+
+    //    val sqlContext = new SQLContext(sc)
+    //    sqlContext.setConf("spark.sql.parquet.useDataSourceApi", "false")
+    //    val brandOutPath = "/input/woss/hive/test_1/partitiontime=20150706"
+    //    sqlContext.parquetFile(brandOutPath)
 
   }
 
