@@ -226,10 +226,10 @@ private[ml] abstract class MVM extends Serializable with Logging {
     dataSet.vertices.leftJoin(delta.join(sigma)) { (vid, attr, gradient) =>
       gradient match {
         case Some((grad, reg)) =>
+          rand.setSeed(Array(iter, vid.toInt, seed))
           val weight = attr
           var i = 0
           while (i < rank) {
-            rand.setSeed(Array(iter, vid.toInt, seed))
             weight(i) -= tis * grad(i) + rand.nextGaussian() * reg(i)
             i += 1
           }

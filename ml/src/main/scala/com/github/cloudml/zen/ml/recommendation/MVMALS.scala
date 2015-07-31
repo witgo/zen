@@ -195,6 +195,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       gradient match {
         case Some((grad, reg)) =>
           assert(!isSampleId(vid))
+          rand.setSeed(Array(iter, vid.toInt, seed))
           val weight = attr
           val viewId = featureId2viewId(vid, views)
           for (rankId <- rankIndices) {
@@ -202,7 +203,6 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
               val h2 = grad(rankId + rank)
               val he = grad(rankId)
               val w = weight(rankId)
-              rand.setSeed(Array(iter, vid.toInt, seed))
               val lm = lambda(rankId + viewId * rank) * mu(rankId + viewId * rank)
               weight(rankId) = (alpha * (w * h2 + he) + lm) * reg(rankId)
               weight(rankId) += rand.nextGaussian() * sqrt(reg(rankId))
