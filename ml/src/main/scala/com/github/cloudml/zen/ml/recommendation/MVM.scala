@@ -138,6 +138,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       val margin = forward(iter)
       val (thisNumSamples, costSum, thisMulti) = multiplier(margin, iter)
       multi = thisMulti
+      drawMu(iter)
       drawLambda(iter)
       val alpha = drawAlpha(multi, iter)
       var (gradient, hx2) = backward(multi, thisNumSamples, iter)
@@ -148,7 +149,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
+      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -202,9 +203,9 @@ private[ml] abstract class MVM extends Serializable with Logging {
       }
     }, reduceInterval, TripletFields.Dst).setName(s"backward-$iter").persist(storageLevel)
     val gradient = arr.mapValues { a =>
-      val deg = a.last
-      a.slice(0, rank).map(_ / deg)
-      // a.slice(0, rank).map(_ / thisNumSamples)
+      // val deg = a.last
+      // a.slice(0, rank).map(_ / deg)
+      a.slice(0, rank).map(_ / thisNumSamples)
     }.setName(s"gradient-$iter").persist(storageLevel)
     val hx2 = arr.mapValues { a =>
       a.slice(rank, 2 * rank)
@@ -221,17 +222,16 @@ private[ml] abstract class MVM extends Serializable with Logging {
     sigma: VertexRDD[VD],
     iter: Int): VertexRDD[VD] = {
     val tis = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
+    val rankIndices = 0 until rank
     val seed = Utils.random.nextInt()
-    val rand = new Well19937c(seed * iter)
+    val rand = new Well19937c(Array(seed, iter))
     dataSet.vertices.leftJoin(delta.join(sigma)) { (vid, attr, gradient) =>
       gradient match {
         case Some((grad, reg)) =>
           rand.setSeed(Array(iter, vid.toInt, seed))
           val weight = attr
-          var i = 0
-          while (i < rank) {
+          for (i <- rankIndices) {
             weight(i) -= tis * grad(i) + rand.nextGaussian() * reg(i)
-            i += 1
           }
           weight
         case None => attr
@@ -242,6 +242,8 @@ private[ml] abstract class MVM extends Serializable with Logging {
   def drawLambda(iter: Int): Unit = {
     val viewsSize = views.length
     val rankIndices = 0 until rank
+    val seed = Utils.random.nextInt()
+    val rand = new Well19937c(Array(seed, iter))
     val dist = features.aggregate(new Array[Double](viewsSize * (rank + 1)))({ case (arr, (featureId, weight)) =>
       val viewId = featureId2viewId(featureId, views)
       for (rankId <- rankIndices) {
@@ -250,8 +252,6 @@ private[ml] abstract class MVM extends Serializable with Logging {
       arr(viewsSize * rank + viewId) += 1
       arr
     }, reduceInterval)
-    val seed = Utils.random.nextInt()
-    val rand = new Well19937c(Array(seed, iter))
     for (viewId <- views.indices) {
       for (rankId <- rankIndices) {
         val shape = (alpha_0 + dist(viewsSize * rank + viewId) + 1.0) / 2.0
@@ -292,6 +292,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       val arr = new Array[Double](rank)
       for (rankId <- rankIndices) {
         arr(rankId) = 1.0 / (alpha * h2(rankId) + lambda(rankId + viewId * rank))
+        // println(s"$alpha * ${h2(rankId)} + ${lambda(rankId + viewId * rank)}")
       }
       arr
     }
@@ -301,10 +302,10 @@ private[ml] abstract class MVM extends Serializable with Logging {
     multi: VertexRDD[VD],
     iter: Int): Double = {
     val e = multi.filter(t => isSampleId(t._1)).mapValues(_.last)
-    val shape = (1 + numSamples) / 2
-    val scale = e.map(t => pow(t._2, 2)).sum() / 2
-    val seed = Utils.random.nextLong()
-    val rand = new Well19937c(seed * iter)
+    val shape = (1.0 + numSamples) / 2.0
+    val scale = e.map(t => pow(t._2 / 2.0, 2.0)).sum() / 2.0
+    val seed = Utils.random.nextInt()
+    val rand = new Well19937c(Array(seed, iter))
     val rng = new GammaDistribution(rand, shape, scale)
     rng.sample()
   }
