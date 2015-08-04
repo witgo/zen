@@ -17,18 +17,15 @@
 
 package com.github.cloudml.zen.ml.recommendation
 
-import java.util.{Random => JavaRandom}
-
 import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.recommendation.MVMALS._
 import com.github.cloudml.zen.ml.util.SparkUtils._
-import com.github.cloudml.zen.ml.util.{XORShiftRandom, Utils}
+import com.github.cloudml.zen.ml.util.Utils
 import org.apache.commons.math3.distribution.GammaDistribution
 import org.apache.commons.math3.random.Well19937c
-import org.apache.spark.{SparkContext, Logging}
+import org.apache.spark.Logging
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.impl.{EdgeRDDImpl, GraphImpl}
-import org.apache.spark.mllib.linalg.{Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
@@ -61,6 +58,11 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   @transient protected var vertices: VertexRDD[VD] = null
   @transient protected var edges: EdgeRDD[ED] = null
   @transient private var innerIter = 1
+
+  @transient protected var previousVertices: VertexRDD[VD] = null
+  @transient protected var previousLoss: Double = Double.MaxValue
+  @transient protected var stepSize: Double = 1e-4
+  @transient protected var isback: Boolean = false
 
   protected val alpha_0 = 1.0
   protected val gamma_0 = 1.0
@@ -113,27 +115,41 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
     for (iter <- 1 to iterations) {
       logInfo(s"Start train (Iteration $iter/$iterations)")
       val startedAt = System.nanoTime()
+      val margin = forward(iter)
+      val t = multiplier(margin, iter)
+      val thisLoss = t._1
+      multi = t._2
+
+      if (thisLoss >= previousLoss) {
+        isback = true
+        stepSize = stepSize / 2.0
+        vertices = previousVertices
+        dataSet = GraphImpl.fromExistingRDDs(previousVertices, edges)
+        checkpointVertices()
+      } else {
+        previousVertices = vertices
+        previousLoss = thisLoss
+        isback = false
+        stepSize = stepSize * 1.7
+        checkpointVertices()
+      }
+
       drawLambda(iter)
       drawMu(iter)
-      val previousVertices = vertices
-      val margin = forward(iter)
-      val (thisNumSamples, costSum, thisMulti) = multiplier(margin, iter)
-      multi = thisMulti
       val alpha = drawAlpha(multi, iter)
-      val delta = backward(multi, thisNumSamples, iter)
+      val delta = backward(multi, iter)
       val sigma = drawSigma(delta, alpha, iter)
       vertices = updateWeight(delta, sigma, alpha, iter)
-      checkpointVertices()
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
-      val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
-      logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
+      delta.unpersist(blocking = false)
 
-      previousVertices.unpersist(blocking = false)
+      val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
+      logInfo(f"(Iteration $iter/$iterations) train: previousLoss=$previousLoss%1.6f thisLoss=$thisLoss%1.6f" +
+        f" stepSize=$stepSize%1.6f elapsedSeconds=$elapsedSeconds%1.4f")
+
       margin.unpersist(blocking = false)
       multi.unpersist(blocking = false)
-      delta.unpersist(blocking = false)
       innerIter += 1
     }
   }
@@ -143,7 +159,6 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   }
 
   protected[ml] def forward(iter: Int): VertexRDD[Array[Double]] = {
-
     dataSet.aggregateMessages[Array[Double]](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
@@ -157,11 +172,10 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
 
   protected def predict(arr: Array[Double]): Double
 
-  protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD])
+  protected def multiplier(q: VertexRDD[VD], iter: Int): (Double, VertexRDD[VD])
 
   protected def backward(
     multi: VertexRDD[VD],
-    thisNumSamples: Long,
     iter: Int): VertexRDD[VD] = {
     GraphImpl.fromExistingRDDs(multi, edges).aggregateMessages[VD](ctx => {
       val sampleId = ctx.dstId
@@ -181,16 +195,10 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
     sigma: VertexRDD[VD],
     alpha: Double,
     iter: Int): VertexRDD[VD] = {
-    // val thisViewId = Utils.random.nextInt(views.length)
-    // val thisViewId =  (iter / rank) % views.length
-    val thisViewId = iter % views.length
-
-    //  val thisRankId= iter % rank
-    val thisRankId = (iter / views.length) % rank
-
     val rankIndices = 0 until rank
     val seed = Utils.random.nextInt()
     val rand = new Well19937c(seed * iter)
+    val tis = stepSize
     dataSet.vertices.leftJoin(delta.join(sigma)) { (vid, attr, gradient) =>
       gradient match {
         case Some((grad, reg)) =>
@@ -198,15 +206,13 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
           val weight = attr
           val viewId = featureId2viewId(vid, views)
           for (rankId <- rankIndices) {
-            if (rankId == thisRankId % rank && viewId == thisViewId) {
-              val h2 = grad(rankId + rank)
-              val he = grad(rankId)
-              val w = weight(rankId)
-              rand.setSeed(Array(iter, vid.toInt, seed))
-              val lm = lambda(rankId + viewId * rank) * mu(rankId + viewId * rank)
-              weight(rankId) = (alpha * (w * h2 + he) + lm) * reg(rankId)
-              weight(rankId) += rand.nextGaussian() * sqrt(reg(rankId))
-            }
+            val h2 = grad(rankId + rank)
+            val he = grad(rankId)
+            val w = weight(rankId)
+            rand.setSeed(Array(iter, vid.toInt, seed))
+            val lm = lambda(rankId + viewId * rank) * mu(rankId + viewId * rank)
+            weight(rankId) += tis * ((alpha * (w * h2 + he) + lm) * reg(rankId) - weight(rankId))
+            weight(rankId) += rand.nextGaussian() * sqrt(reg(rankId))
           }
           weight
         case None => attr
@@ -288,6 +294,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
   protected def checkpointVertices(): Unit = {
     val sc = vertices.sparkContext
     if (innerIter % checkpointInterval == 0 && sc.getCheckpointDir.isDefined) {
+      vertices = vertices.mapValues(t => t)
       vertices.checkpoint()
     }
   }
@@ -321,8 +328,7 @@ class MVMALSRegression(
     result
   }
 
-  override protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
-    val accNumSamples = q.sparkContext.accumulator(1L)
+  override protected def multiplier(q: VertexRDD[VD], iter: Int): (Double, VertexRDD[VD]) = {
     val accLossSum = q.sparkContext.accumulator(0.0)
     val multi = dataSet.vertices.leftJoin(q) { (vid, data, deg) =>
       deg match {
@@ -334,16 +340,15 @@ class MVMALSRegression(
           // assert(abs(perd -  predict(m)) < 1e-6)
           val diff = y - perd
           accLossSum += pow(diff, 2)
-          accNumSamples += 1L
+
           arr(arr.length - 1) = diff
           arr
         case _ => data
       }
     }.setName(s"multiplier-$iter").persist(storageLevel)
     multi.count()
-    val numSamples = accNumSamples.value
     val costSum = accLossSum.value
-    (numSamples.toLong, sqrt(costSum / numSamples), multi)
+    (sqrt(costSum / numSamples), multi)
   }
 }
 

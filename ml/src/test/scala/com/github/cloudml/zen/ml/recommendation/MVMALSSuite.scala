@@ -48,7 +48,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     }.persist(StorageLevel.MEMORY_AND_DISK)
     val maxMovieId = movieLens.map(_._2._1).max + 1
     val maxUserId = movieLens.map(_._1).max + 1
-    val numFeatures = maxUserId + maxMovieId * 2
+    val numFeatures = maxUserId + maxMovieId
     val dataSet = movieLens.map { case (userId, (movieId, rating)) =>
       val sv = BSV.zeros[Double](maxMovieId)
       sv(movieId) = rating
@@ -59,9 +59,6 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
         val sv = BSV.zeros[Double](numFeatures)
         sv(userId) = 1.0
         sv(movieId + maxUserId) = 1.0
-        ratings.activeKeysIterator.foreach { mId =>
-          sv(maxMovieId + maxUserId + mId) = 1.0 / math.sqrt(activeSize)
-        }
         new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
       }
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
@@ -69,7 +66,7 @@ class MVMALSSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val numIterations = 200
-    val rank = 5
+    val rank = 20
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()

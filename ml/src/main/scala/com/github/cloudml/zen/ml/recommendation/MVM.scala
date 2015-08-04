@@ -148,7 +148,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
-      logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
+      logInfo(s"End train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
       margin.unpersist(blocking = false)
