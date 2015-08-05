@@ -122,7 +122,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
 
       if (thisLoss >= previousLoss) {
         isback = true
-        stepSize = stepSize / 2.0
+        stepSize = stepSize / 5.7
         vertices = previousVertices
         dataSet = GraphImpl.fromExistingRDDs(previousVertices, edges)
         checkpointVertices()
@@ -130,7 +130,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
         previousVertices = vertices
         previousLoss = thisLoss
         isback = false
-        stepSize = stepSize * 1.7
+        stepSize = stepSize * 1.9
         checkpointVertices()
       }
 
@@ -145,7 +145,7 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       delta.unpersist(blocking = false)
 
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(f"(Iteration $iter/$iterations) train: previousLoss=$previousLoss%1.6f thisLoss=$thisLoss%1.6f" +
+      println(f"(Iteration $iter/$iterations) train: previousLoss=$previousLoss%1.6f thisLoss=$thisLoss%1.6f" +
         f" stepSize=$stepSize%1.6f elapsedSeconds=$elapsedSeconds%1.4f")
 
       margin.unpersist(blocking = false)
@@ -203,13 +203,13 @@ private[ml] abstract class MVMALS extends Serializable with Logging {
       gradient match {
         case Some((grad, reg)) =>
           assert(!isSampleId(vid))
+          rand.setSeed(Array(iter, vid.toInt, seed))
           val weight = attr
           val viewId = featureId2viewId(vid, views)
           for (rankId <- rankIndices) {
             val h2 = grad(rankId + rank)
             val he = grad(rankId)
             val w = weight(rankId)
-            rand.setSeed(Array(iter, vid.toInt, seed))
             val lm = lambda(rankId + viewId * rank) * mu(rankId + viewId * rank)
             weight(rankId) += tis * ((alpha * (w * h2 + he) + lm) * reg(rankId) - weight(rankId))
             weight(rankId) += rand.nextGaussian() * sqrt(reg(rankId))
