@@ -49,23 +49,18 @@ class MFALSSuite extends FunSuite with SharedSparkContext with Matchers {
     val maxUserId = movieLens.map(_._1).max + 1
     val numFeatures = maxUserId + maxMovieId
     val dataSet = movieLens.map { case (userId, (movieId, rating)) =>
-      val sv = BSV.zeros[Double](maxMovieId)
-      sv(movieId) = rating
-      (userId, sv)
-    }.reduceByKey(_ :+= _).flatMap { case (userId, ratings) =>
-      ratings.activeIterator.map { case (movieId, rating) =>
-        val sv = BSV.zeros[Double](numFeatures)
-        sv(userId) = 1.0
-        sv(movieId + maxUserId) = 1.0
-        new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
-      }
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv.compact()
+      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
     dataSet.count()
     movieLens.unpersist()
 
     val lambda = 0.0
     val numIterations = 200
-    val rank = 1
+    val rank = 3
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
