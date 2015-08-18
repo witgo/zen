@@ -104,4 +104,54 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
   }
 
+
+  test("movieLens 100k regression") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
+    val checkpointDir = s"$sparkHome/tmp"
+    sc.setCheckpointDir(checkpointDir)
+
+    val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
+      iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
+        val Array(userId, movieId, rating, timestamp) = line.split("\t")
+        (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24))
+      }
+    }.persist(StorageLevel.MEMORY_AND_DISK)
+    val maxUserId = movieLens.map(_._1).max + 1
+    val maxMovieId = movieLens.map(_._2).max + 1
+    val minDay = movieLens.map(_._4).min()
+    val numFeatures = maxUserId + maxMovieId + movieLens.map(_._4).max() - minDay + 1
+
+    val dataSet = movieLens.map { case (userId, movieId, rating, timestamp) =>
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv(timestamp - minDay + maxUserId + maxMovieId) = 1.0
+      new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+    dataSet.count()
+    movieLens.unpersist()
+
+    val stepSize = 0.1
+    val numIterations = 200
+    val regParam = 0.01
+
+    val rank = 10
+    val useAdaGrad = true
+    val useWeightedLambda = true
+    val miniBatchFraction = 1.0
+    val views = Array(maxUserId, maxUserId + maxMovieId, numFeatures).map(_.toLong)
+    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
+    trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
+    testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
+
+    val fm = new MVMRegression(trainSet, stepSize, views,
+      regParam, 0.0, rank, useAdaGrad, useWeightedLambda, miniBatchFraction)
+
+    fm.run(numIterations)
+    val model = fm.saveModel()
+    println(f"Test loss: ${model.loss(testSet)}%1.4f")
+
+  }
+
 }

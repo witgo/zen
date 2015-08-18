@@ -19,6 +19,7 @@ package com.github.cloudml.zen.ml.recommendation
 
 import java.util.{Random => JavaRandom}
 
+import breeze.optimize.{StepSizeUnderflow, StrongWolfeLineSearch, DiffFunction}
 import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.recommendation.MVM._
 import com.github.cloudml.zen.ml.util.SparkUtils._
@@ -54,11 +55,17 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
   // SGD
   @transient protected var dataSet: Graph[VD, ED] = null
-  @transient protected var multi: VertexRDD[Array[Double]] = null
-  @transient protected var gradientSum: VertexRDD[Array[Double]] = null
+  @transient protected var multi: VertexRDD[VD] = null
+  @transient protected var previousGrad: VertexRDD[VD] = null
+
+  @transient protected var previousVertices: VertexRDD[VD] = null
   @transient protected var vertices: VertexRDD[VD] = null
   @transient protected var edges: EdgeRDD[ED] = null
-  @transient private var innerIter = 1
+  @transient protected var delta: VertexRDD[(IndexedSeq[VD], IndexedSeq[VD])] = null
+  @transient private var innerIter: Int = 1
+
+  var stepSize: Double
+  lazy val rankIndices = 0 until rank
 
   def setDataSet(data: Graph[VD, ED]): this.type = {
     vertices = data.vertices
@@ -80,60 +87,82 @@ private[ml] abstract class MVM extends Serializable with Logging {
     this
   }
 
-  def stepSize: Double
-
   def views: Array[Long]
 
   def regParam: Double
 
   def elasticNetParam: Double
 
-  def halfLife: Int = 40
-
-  def epsilon: Double = 1e-6
-
   def rank: Int
-
-  def useAdaGrad: Boolean
 
   def useWeightedLambda: Boolean
 
   def storageLevel: StorageLevel
 
-  def miniBatchFraction: Double
-
-  protected[ml] def mask: Int = {
-    max(1 / miniBatchFraction, 1).toInt
-  }
-
   def samples: VertexRDD[VD] = {
-    dataSet.vertices.filter(t => t._1 < 0)
+    dataSet.vertices.filter(t => isSampleId(t._1))
   }
 
   def features: VertexRDD[VD] = {
-    dataSet.vertices.filter(t => t._1 >= 0)
+    dataSet.vertices.filter(t => !isSampleId(t._1))
   }
 
   def run(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
       logInfo(s"Start train (Iteration $iter/$iterations)")
       val startedAt = System.nanoTime()
-      val previousVertices = vertices
-      val margin = forward(innerIter)
-      var (_, rmse, gradient) = backward(margin, innerIter)
-      gradient = updateGradientSum(gradient, innerIter)
-      vertices = updateWeight(gradient, innerIter)
-      checkpointVertices()
-      vertices.count()
-      dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
+      val margin = forward(dataSet, innerIter)
+      val (_, rmse, thisMulti) = multiplier(margin, iter)
+      multi = thisMulti
+      var gradient = backward(dataSet, multi, innerIter)
+      assert(gradient.count == numFeatures)
+      val newVertices = updateWeight(dataSet, gradient, stepSize, innerIter)
+      if (innerIter > 1) {
+        println(newVertices.filter(t => !isSampleId(t._1)).mapValues(_.slice(0, rank).sum).map(_._2).sum)
+        println(previousVertices.filter(t => !isSampleId(t._1)).mapValues(_.slice(0, rank).sum).map(_._2).sum)
+      }
+      checkpointVertices(newVertices)
+      newVertices.count()
+      dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
+      vertices = newVertices
+
+      if (innerIter > 10) {
+        val s = vertices.filter(t => !isSampleId(t._1)).innerJoin(previousVertices) { (id, s_k1, s_k) =>
+          rankIndices.map { i =>
+            val diff = s_k1(i) - s_k(i)
+            // assert(diff != 0.0)
+            diff
+          }.toArray
+        }
+
+        assert(s.map(_._2.sum).sum() != 0.0)
+        val y = gradient.innerJoin(previousGrad) { (id, y_k1, y_k) =>
+          rankIndices.map { i =>
+            val diff = y_k1(i) - y_k(i)
+            // assert(diff != 0.0)
+            diff
+          }.toArray
+        }
+        y.count()
+        delta = eddd(s, y, delta, 10)
+        val dir = twoLoopRecursion(gradient, delta)
+        stepSize = determineStepSize(dir, innerIter)
+        println(stepSize)
+        gradient.unpersist(blocking = false)
+        gradient = dir
+
+      }
+
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(s"(Iteration $iter/$iterations) loss:                     $rmse")
+      println(s"(Iteration $iter/$iterations) loss:                     $rmse")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
-      previousVertices.unpersist(blocking = false)
+      Option(previousVertices).foreach(_.unpersist(blocking = false))
+      previousVertices = vertices
       margin.unpersist(blocking = false)
       multi.unpersist(blocking = false)
-      gradient.unpersist(blocking = false)
+      Option(previousGrad).foreach(_.unpersist(blocking = false))
+      previousGrad = gradient
       innerIter += 1
     }
   }
@@ -142,18 +171,13 @@ private[ml] abstract class MVM extends Serializable with Logging {
     new MVMModel(rank, views, false, features.mapValues(arr => arr.slice(0, arr.length - 1)))
   }
 
-  protected[ml] def forward(iter: Int): VertexRDD[Array[Double]] = {
-    val mod = mask
-    val random = genRandom(mod, iter)
-    val seed = random.nextLong()
+  protected[ml] def forward(dataSet: Graph[VD, ED], iter: Int): VertexRDD[Array[Double]] = {
     dataSet.aggregateMessages[Array[Double]](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
       val viewId = featureId2viewId(featureId, views)
-      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
-        val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
-        ctx.sendToDst(result)
-      }
+      val result = forwardInterval(rank, views.length, viewId, ctx.attr, ctx.srcAttr)
+      ctx.sendToDst(result)
     }, reduceInterval, TripletFields.Src).setName(s"margin-$iter").persist(storageLevel)
   }
 
@@ -161,47 +185,42 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
   protected def multiplier(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD])
 
-  protected def backward(q: VertexRDD[VD], iter: Int): (Long, Double, VertexRDD[VD]) = {
-    val (thisNumSamples, costSum, thisMulti) = multiplier(q, iter)
-    multi = thisMulti
-    val mod = mask
-    val random = genRandom(mod, iter)
-    val seed = random.nextLong()
+  protected def backward(
+    dataSet: Graph[VD, ED],
+    multi: VertexRDD[VD],
+    iter: Int): VertexRDD[VD] = {
     val gradient = GraphImpl.fromExistingRDDs(multi, edges).aggregateMessages[VD](ctx => {
       val sampleId = ctx.dstId
       val featureId = ctx.srcId
-      if (mod == 1 || isSampled(random, seed, sampleId, iter, mod)) {
-        val x = ctx.attr
-        val arr = ctx.dstAttr
-        val viewId = featureId2viewId(featureId, views)
-        val m = backwardInterval(rank, viewId, x, arr, arr.last)
-        ctx.sendToSrc(m)
+      val x = ctx.attr
+      val arr = ctx.dstAttr
+      val viewId = featureId2viewId(featureId, views)
+      val m = backwardInterval(rank, viewId, x, arr, arr.last)
+      ctx.sendToSrc(m)
+    }, reduceInterval, TripletFields.Dst).mapValues { a =>
+      val deg = a.last
+      // a.slice(0, rank).map(_ / deg)
+      a.slice(0, rank).map(_ / numSamples)
+    }.innerJoin(dataSet.vertices) { case (_, g, w) =>
+      rankIndices.foreach { i =>
+        g(i) += regParam * w(i)
       }
-    }, reduceInterval, TripletFields.Dst).mapValues { gradients =>
-      gradients.map(_ / thisNumSamples)
-    }
-    (thisNumSamples, costSum, gradient.setName(s"gradient-$iter").persist(storageLevel))
+      g
+    }.setName(s"gradient-$iter").persist(storageLevel)
+    gradient.setName(s"gradient-$iter").persist(storageLevel)
   }
 
   // Updater for elastic net regularized problems
-  protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
-    val gradient = delta
-    val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-    val shrinkageVal = elasticNetParam * regParam * thisIterStepSize
-    val regParamL2 = (1.0 - elasticNetParam) * regParam
+  protected def updateWeight(
+    dataSet: Graph[VD, ED],
+    gradient: VertexRDD[Array[Double]],
+    stepSize: Double, iter: Int): VertexRDD[VD] = {
     dataSet.vertices.leftJoin(gradient) { (_, attr, gradient) =>
       gradient match {
         case Some(grad) =>
-          val weight = attr
-          val wd = if (useWeightedLambda) weight.last / (numSamples + 1.0) else 1.0
-          var i = 0
-          while (i < rank) {
-            if (grad(i) != 0.0) {
-              weight(i) -= thisIterStepSize * (grad(i) + regParamL2 * wd * weight(i))
-              val wi = weight(i)
-              weight(i) = signum(wi) * max(0.0, abs(wi) - wd * shrinkageVal)
-            }
-            i += 1
+          val weight = attr.clone()
+          rankIndices.foreach { i =>
+            weight(i) -= stepSize * grad(i)
           }
           weight
         case None => attr
@@ -209,84 +228,205 @@ private[ml] abstract class MVM extends Serializable with Logging {
     }.setName(s"vertices-$iter").persist(storageLevel)
   }
 
-  protected def updateGradientSum(
-    gradient: VertexRDD[Array[Double]],
-    iter: Int): VertexRDD[Array[Double]] = {
-    if (useAdaGrad) {
-      val rho = math.exp(-math.log(2.0) / halfLife)
-      val delta = adaGrad(gradientSum, gradient, epsilon, 1.0, iter)
-      // val delta = esgd(gradientSum, gradient, epsilon, 1.0, iter)
-      checkpointGradientSum(delta)
-      delta.setName(s"delta-$iter").persist(storageLevel).count()
-
-      gradient.unpersist(blocking = false)
-      val newGradient = delta.mapValues(_._1).filter(_._2 != null).
-        setName(s"gradient-$iter").persist(storageLevel)
-      newGradient.count()
-
-      if (gradientSum != null) gradientSum.unpersist(blocking = false)
-      gradientSum = delta.mapValues(_._2).setName(s"gradientSum-$iter").persist(storageLevel)
-      gradientSum.count()
-      delta.unpersist(blocking = false)
-      newGradient
+  def eddd(
+    s: VertexRDD[VD],
+    y: VertexRDD[VD],
+    delta: VertexRDD[(IndexedSeq[VD], IndexedSeq[VD])],
+    m: Int): VertexRDD[(IndexedSeq[VD], IndexedSeq[VD])] = {
+    (if (delta == null) {
+      s.mapValues(_ => (IndexedSeq[VD](), IndexedSeq[VD]()))
     } else {
-      gradient
+      delta
+    }).innerJoin(s.join(y)) { case (_, (memStep, memGradDelta), (s, y)) =>
+      ((s +: memStep).take(m), (y +: memGradDelta).take(m))
     }
   }
 
-  protected def adaGrad(
-    gradientSum: VertexRDD[Array[Double]],
-    gradient: VertexRDD[Array[Double]],
-    epsilon: Double,
-    rho: Double,
-    iter: Int): VertexRDD[(Array[Double], Array[Double])] = {
-    val delta = if (gradientSum == null) {
-      features.mapValues(t => t.map(x => 0.0))
-    }
-    else {
-      gradientSum
-    }
+  // Large-scale L-BFGS using MapReduce(Algorithm 2)
+  def twoLoopRecursion(
+    grad: VertexRDD[VD],
+    delta: VertexRDD[(IndexedSeq[VD], IndexedSeq[VD])]) = {
+    val rankIndices = 0 until rank
 
-    val newGradSum = delta.innerJoin(gradient) { case (_, gs, grad) =>
-      val gradLen = grad.length
-      val newGradSum = new Array[Double](gradLen)
-      val newGrad = new Array[Double](gradLen)
-      for (i <- 0 until gradLen) {
-        newGradSum(i) = gs(i) * rho + pow(grad(i), 2)
-        val div = epsilon + sqrt(newGradSum(i))
-        newGrad(i) = grad(i) / div
+    grad.innerJoin(delta) { case (_, g, (s, y)) =>
+      val direction = new Array[ED](rank)
+      val mIndices = s.indices
+      val mReverseIndices = mIndices.reverse
+      rankIndices.foreach { rankId =>
+        var p = g(rankId)
+        assert(!p.isNaN)
+        val m = s.size
+        val a = new Array[Double](m)
+        mReverseIndices.foreach { i =>
+          a(i) = (s(i)(rankId) * p) / (s(i)(rankId) * y(i)(rankId))
+          if (Utils.random.nextDouble() < 1e-6) {
+            println(s"(${s(i)(rankId)} * p) / (s(i)(rankId) * ${y(i)(rankId)})")
+          }
+
+          assert(!a(i).isNaN)
+          p = p - a(i) * y(i)(rankId)
+        }
+        assert(!p.isNaN)
+        p = (s(m - 1)(rankId) * y(m - 1)(rankId)) / (y(m - 1)(rankId) * y(m - 1)(rankId)) * p
+
+        assert(!p.isNaN)
+        mIndices.foreach { i =>
+          val b = (y(i)(rankId) * p) / (s(i)(rankId) * y(i)(rankId))
+          p = p + (a(i) - b) * s(i)(rankId)
+        }
+        assert(!p.isNaN)
+        direction(rankId) = p
       }
-      (newGrad, newGradSum)
+      direction
     }
-    newGradSum
   }
 
-  protected def esgd(
-    gradientSum: VertexRDD[Array[Double]],
-    gradient: VertexRDD[Array[Double]],
-    epsilon: Double,
-    rho: Double,
-    iter: Int): VertexRDD[(Array[Double], Array[Double])] = {
-    val delta = if (gradientSum == null) {
-      features.mapValues(t => t.map(x => 0.0))
+  def gradientAt(
+    alpha: Double,
+    direction: VertexRDD[VD],
+    vertices: VertexRDD[VD],
+    edges: EdgeRDD[ED]): (Double, Double) = {
+    val rankIndices = 0 until rank
+    val newVertices = vertices.leftJoin(direction) { case (vid, x, dir) =>
+      val newX = x.clone()
+      if (!isSampleId(vid)) {
+        val d = dir.get
+        rankIndices.foreach { rankId =>
+          newX(rankId) = x(rankId) + alpha * d(rankId)
+        }
+      }
+      newX
     }
-    else {
-      gradientSum
+    val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
+    val margin = forward(dataSet, innerIter)
+    val (_, rmse, thisMulti) = multiplier(margin, innerIter)
+    val gradient = backward(dataSet, thisMulti, innerIter)
+
+    val dd = gradient.innerJoin(direction) { case (_, g, d) =>
+      var s = 0.0
+      rankIndices.foreach { rankId =>
+        s += g(rankId) * d(rankId)
+      }
+      s
+    }.aggregate(0.0)((a, b) => a + b._2, _ + _)
+    margin.unpersist(blocking = false)
+    (rmse, dd)
+  }
+
+  def functionFromSearchDirection(
+    direction: VertexRDD[VD],
+    vertices: VertexRDD[VD],
+    edges: EdgeRDD[ED]): DiffFunction[Double] = new DiffFunction[Double] {
+    /** calculates the value at a point */
+    override def valueAt(alpha: Double): Double = {
+      val rankIndices = 0 until rank
+      val newVertices = vertices.leftJoin(direction) { case (vid, x, dir) =>
+        if (!isSampleId(vid)) {
+          val newX = x.clone()
+          val d = dir.get
+          rankIndices.foreach { rankId =>
+            newX(rankId) = x(rankId) - alpha * d(rankId)
+            assert(!newX(rankId).isNaN())
+          }
+          newX
+        } else {
+          x
+        }
+      }
+      val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
+      val margin = forward(dataSet, innerIter)
+      val (_, rmse, thisMulti) = multiplier(margin, innerIter)
+      margin.unpersist(blocking = false)
+      thisMulti.unpersist(blocking = false)
+      rmse
     }
 
-    val newGradSum = delta.innerJoin(gradient) { case (_, gs, grad) =>
-      val gradLen = grad.length
-      val newGradSum = new Array[Double](gradLen)
-      val newGrad = new Array[Double](gradLen)
-      for (i <- 0 until gradLen) {
-        val h = Utils.random.nextGaussian()
-        newGradSum(i) = gs(i) * rho + pow(h * grad(i), 2)
-        val div = epsilon + sqrt(newGradSum(i) / iter)
-        newGrad(i) = grad(i) / div
+    /** calculates the gradient at a point */
+    override def gradientAt(alpha: Double): Double = {
+      val rankIndices = 0 until rank
+      val newVertices = vertices.leftJoin(direction) { case (vid, x, dir) =>
+        if (!isSampleId(vid)) {
+          val newX = x.clone()
+          val d = dir.get
+          rankIndices.foreach { rankId =>
+            newX(rankId) = x(rankId) - alpha * d(rankId)
+            assert(!newX(rankId).isNaN())
+          }
+          newX
+        } else {
+          x
+        }
       }
-      (newGrad, newGradSum)
+      val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
+      val margin = forward(dataSet, innerIter)
+      margin.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val (_, rmse, thisMulti) = multiplier(margin, innerIter)
+      thisMulti.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val gradient = backward(dataSet, thisMulti, innerIter)
+      gradient.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val dd = gradient.innerJoin(direction) { case (_, g, d) =>
+        var s = 0.0
+        rankIndices.foreach { rankId =>
+          s += g(rankId) * d(rankId)
+        }
+        s
+      }.aggregate(0.0)((a, b) => a + b._2, _ + _)
+      margin.unpersist(blocking = false)
+      thisMulti.unpersist(blocking = false)
+      gradient.unpersist(blocking = false)
+      dd
     }
-    newGradSum
+
+    /** Calculates both the value and the gradient at a point */
+    def calculate(alpha: Double): (Double, Double) = {
+      val rankIndices = 0 until rank
+      val newVertices = vertices.leftJoin(direction) { case (vid, x, dir) =>
+        if (!isSampleId(vid)) {
+          val newX = x.clone()
+          val d = dir.get
+          rankIndices.foreach { rankId =>
+            newX(rankId) = x(rankId) - alpha * d(rankId)
+          }
+          newX
+        } else {
+          x
+        }
+
+      }
+      direction.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      newVertices.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
+      val margin = forward(dataSet, innerIter)
+      margin.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val (_, rmse, thisMulti) = multiplier(margin, innerIter)
+      val gradient = backward(dataSet, thisMulti, innerIter)
+      thisMulti.foreach(_._2.foreach(t => assert(!t.isNaN)))
+      val dd = gradient.innerJoin(direction) { case (_, g, d) =>
+        var s = 0.0
+        rankIndices.foreach { rankId =>
+          s += g(rankId) * d(rankId)
+        }
+        s
+      }.aggregate(0.0)((a, b) => a + b._2, _ + _)
+      margin.unpersist(blocking = false)
+      thisMulti.unpersist(blocking = false)
+      gradient.unpersist(blocking = false)
+      println(s"calculate: $rmse -> $dd")
+      rmse -> dd
+    }
+  }
+
+  def determineStepSize(dir: VertexRDD[VD], innerIter: Int): Double = {
+    val ff = functionFromSearchDirection(dir, vertices, edges)
+    val search = new StrongWolfeLineSearch(maxZoomIter = 10, maxLineSearchIter = 10)
+    val init = if (innerIter < 11) {
+      1.0 / dir.map(_._2.map(_.abs).sum).sum
+    }
+    else {
+      1.0
+    }
+    val alpha = search.minimize(ff, init)
+    alpha
   }
 
   protected def checkpointGradientSum(delta: VertexRDD[(Array[Double], Array[Double])]): Unit = {
@@ -296,7 +436,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
     }
   }
 
-  protected def checkpointVertices(): Unit = {
+  protected def checkpointVertices(vertices: VertexRDD[VD]): Unit = {
     val sc = vertices.sparkContext
     if (innerIter % checkpointInterval == 0 && sc.getCheckpointDir.isDefined) {
       vertices.checkpoint()
@@ -306,7 +446,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
 class MVMClassification(
   @transient _dataSet: Graph[VD, ED],
-  val stepSize: Double,
+  override var stepSize: Double,
   val views: Array[Long],
   val regParam: Double,
   val elasticNetParam: Double,
@@ -376,7 +516,7 @@ class MVMClassification(
 
 class MVMRegression(
   @transient _dataSet: Graph[VD, ED],
-  val stepSize: Double,
+  override var stepSize: Double,
   val views: Array[Long],
   val regParam: Double,
   val elasticNetParam: Double,
@@ -542,7 +682,7 @@ object MVM {
     val features = edges.map(_.srcId).distinct().map { featureId =>
       // parameter point
       val parms = Array.fill(rank + 1) {
-        Utils.random.nextGaussian() * 1e-2
+        Utils.random.nextGaussian() * 1e-1
       }
       (featureId, parms)
     }.join(inDegrees).map { case (featureId, (parms, deg)) =>
@@ -593,6 +733,11 @@ object MVM {
   @inline private[ml] def isSampleId(id: Long): Boolean = {
     id < 0
   }
+
+  @inline private[ml] def isSampleId[T](id: (Long, T)): Boolean = {
+    id._1 < 0
+  }
+
 
   @inline private[ml] def isSampled(
     random: JavaRandom,
@@ -673,12 +818,13 @@ object MVM {
     x: ED,
     arr: VD,
     multi: ED): VD = {
-    val m = new Array[Double](rank)
+    val m = new Array[Double](rank + 1)
     var i = 0
     while (i < rank) {
       m(i) = multi * x * arr(i + viewId * rank)
       i += 1
     }
+    m(rank) = 1.0
     m
   }
 
