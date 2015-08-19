@@ -95,7 +95,7 @@ object MovieLensMVM {
       GraphXUtils.registerKryoClasses(conf)
       // conf.set("spark.kryoserializer.buffer.mb", "8")
     }
-    Logger.getRootLogger.setLevel(Level.WARN)
+    // Logger.getRootLogger.setLevel(Level.WARN)
     val sc = new SparkContext(conf)
     val checkpointDir = s"$out/checkpoint"
     sc.setCheckpointDir(checkpointDir)
@@ -107,27 +107,27 @@ object MovieLensMVM {
     }.persist(StorageLevel.MEMORY_AND_DISK)
     val maxMovieId = movieLens.map(_._2._1).max + 1
     val maxUserId = movieLens.map(_._1).max + 1
-    val numFeatures = maxUserId + 2 * maxMovieId
+    val numFeatures = maxUserId + maxMovieId
 
     /**
      * The first view contains [0,maxUserId),The second view contains [maxUserId, maxMovieId + maxUserId)...
      * The third contains [maxMovieId + maxUserId, numFeatures)  The last id equals the number of features
      */
-    val views = Array(maxUserId, maxMovieId + maxUserId, numFeatures).map(_.toLong)
+    val views = Array(maxUserId, numFeatures).map(_.toLong)
 
     val dataSet = movieLens.map { case (userId, (movieId, rating)) =>
       val sv = BSV.zeros[Double](maxMovieId)
       sv(movieId) = rating
       (userId, sv)
-    }.reduceByKey(_ :+= _).flatMap { case (userId, ratings) =>
+    }.reduceByKey(_ :+= _, sc.defaultParallelism).flatMap { case (userId, ratings) =>
       val activeSize = ratings.activeSize
       ratings.activeIterator.map { case (movieId, rating) =>
         val sv = BSV.zeros[Double](numFeatures)
         sv(userId) = 1.0
         sv(movieId + maxUserId) = 1.0
-        ratings.activeKeysIterator.foreach { mId =>
-          sv(maxMovieId + maxUserId + mId) = 1.0 / math.sqrt(activeSize)
-        }
+        //        ratings.activeKeysIterator.foreach { mId =>
+        //          sv(maxMovieId + maxUserId + mId) = 1.0 / math.sqrt(activeSize)
+        //        }
         new LabeledPoint(rating, new SSV(sv.length, sv.index.slice(0, sv.used), sv.data.slice(0, sv.used)))
       }
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
