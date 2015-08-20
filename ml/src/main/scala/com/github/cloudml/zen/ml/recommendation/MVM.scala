@@ -92,8 +92,6 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
   def regParam: Double
 
-  def elasticNetParam: Double
-
   def rank: Int
 
   def useWeightedLambda: Boolean
@@ -125,7 +123,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       previousGrad = gradient
 
       val dir = twoLoopRecursion(gradient, delta, innerIter)
-      stepSize = determineStepSize(dir, rmse, innerIter)
+      stepSize = determineStepSize(dir, innerIter)
       Option(previousVertices).foreach(_.unpersist(blocking = false))
       previousVertices = vertices
       vertices = updateWeight(dataSet, dir, stepSize, innerIter)
@@ -134,7 +132,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       println(s"(Iteration $iter/$iterations) stepSize: $stepSize")
-      println(s"(Iteration $iter/$iterations) loss:                     $rmse")
+      println(f"(Iteration $iter/$iterations) loss:                     $rmse%1.6G")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       gradient.unpersist(blocking = false)
@@ -180,9 +178,9 @@ private[ml] abstract class MVM extends Serializable with Logging {
       //  a.slice(0, rank).map(_ / deg)
       a.slice(0, rank).map(_ / numSamples)
     }.innerJoin(dataSet.vertices) { case (_, g, w) =>
+      val wd = if (useWeightedLambda) w.last / (numSamples + 1.0) else 1.0
       rankIndices.foreach { i =>
-        g(i) += 0.0 * regParam * w(i)
-        // g(i) = 0.0 - g(i)
+        g(i) += wd * regParam * w(i)
       }
       g
     }.setName(s"gradient-$iter").persist(storageLevel)
@@ -333,6 +331,26 @@ private[ml] abstract class MVM extends Serializable with Logging {
       direction.foreach(_._2.foreach(t => assert(!t.isNaN)))
       newVertices.foreach(_._2.foreach(t => assert(!t.isNaN)))
 
+      val wl = useWeightedLambda
+      val r = regParam
+      val ns = numSamples
+      val regVal = newVertices.aggregate(0.0)(seqOp = (a, b) => {
+        if (isSampleId(b._1)) {
+          a
+        } else {
+          val w = b._2
+          val wd = if (wl) w.last / (ns + 1.0) else 1.0
+          var s = 0.0
+          rankIndices.foreach { i =>
+            s += pow(w(i), 2.0)
+          }
+          a + 0.5 * wd * r * s
+        }
+      }, _ + _)
+
+      println(f"regVal: $regVal%1.6f")
+      assert(regParam != 0.0)
+
       val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
       val margin = forward(dataSet, innerIter)
 
@@ -354,12 +372,12 @@ private[ml] abstract class MVM extends Serializable with Logging {
       margin.unpersist(blocking = false)
       thisMulti.unpersist(blocking = false)
       gradient.unpersist(blocking = false)
-      println(s"calculate: $alpha -> $rmse -> $dd")
-      rmse -> dd
+      println(f"calculate: $alpha%1.6G -> $rmse%1.6G -> ${rmse + regVal}%1.6G -> $dd%1.6G")
+      (rmse + regVal, dd)
     }
   }
 
-  def determineStepSize(dir: VertexRDD[VD], rmse: Double, iter: Int): Double = {
+  def determineStepSize(dir: VertexRDD[VD], iter: Int): Double = {
     val ff = functionFromSearchDirection(dir, vertices, edges)
     val init = if (innerIter < 3) 0.1 else 1.0
     val search = new BacktrackingLineSearch(ff.valueAt(init), enforceWolfeConditions = false,
