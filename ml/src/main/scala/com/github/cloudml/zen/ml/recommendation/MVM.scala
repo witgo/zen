@@ -349,7 +349,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       }, _ + _)
 
       println(f"regVal: $regVal%1.6f")
-      assert(regParam != 0.0)
+      if (regParam != 0.0) assert(regParam != 0.0)
 
       val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
       val margin = forward(dataSet, innerIter)
