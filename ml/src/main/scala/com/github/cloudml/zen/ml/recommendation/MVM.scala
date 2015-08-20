@@ -19,7 +19,8 @@ package com.github.cloudml.zen.ml.recommendation
 
 import java.util.{Random => JavaRandom}
 
-import breeze.optimize.{BacktrackingLineSearch, StepSizeUnderflow, StrongWolfeLineSearch, DiffFunction}
+import breeze.optimize._
+import com.github.cloudml.zen.ml.optimize.BacktrackingLineSearch
 import breeze.linalg.{DenseMatrix => BDM}
 import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.recommendation.MVM._
@@ -174,8 +175,8 @@ private[ml] abstract class MVM extends Serializable with Logging {
       val m = backwardInterval(rank, viewId, x, arr, arr.last)
       ctx.sendToSrc(m)
     }, reduceInterval, TripletFields.Dst).mapValues { a =>
-      //  val deg = a.last
-      //  a.slice(0, rank).map(_ / deg)
+      // val deg = a.last
+      // a.slice(0, rank).map(_ / deg)
       a.slice(0, rank).map(_ / numSamples)
     }.innerJoin(dataSet.vertices) { case (_, g, w) =>
       val wd = if (useWeightedLambda) w.last / (numSamples + 1.0) else 1.0
@@ -215,18 +216,22 @@ private[ml] abstract class MVM extends Serializable with Logging {
     val newDelta = Option(delta).getOrElse(features.mapValues(_ => (IndexedSeq.empty[VD], IndexedSeq.empty[VD])))
     if (previousVertices == null) return newDelta
     val s = vertices.filter(t => !isSampleId(t._1)).innerJoin(previousVertices) { (id, s_k1, s_k) =>
-      rankIndices.map { i =>
+      val arr = new Array[Double](rank)
+      rankIndices.foreach { i =>
         val diff = s_k1(i) - s_k(i)
-        assert(diff != 0.0)
-        diff
-      }.toArray
+        // assert(diff != 0.0)
+        arr(i) = if (diff == 0.0) 1e-12 else diff
+      }
+      arr
     }
     val y = grad.innerJoin(previousGrad) { (id, y_k1, y_k) =>
-      rankIndices.map { i =>
+      val arr = new Array[Double](rank)
+      rankIndices.foreach { i =>
         val diff = y_k1(i) - y_k(i)
-        assert(diff != 0.0)
-        diff
-      }.toArray
+        // assert(diff != 0.0)
+        arr(i) = if (diff == 0.0) 1e-12 else diff
+      }
+      arr
     }
     newDelta.innerJoin(s.join(y)) { case (_, (memStep, memGradDelta), (s, y)) =>
       ((s +: memStep).take(m), (y +: memGradDelta).take(m))
@@ -332,57 +337,53 @@ private[ml] abstract class MVM extends Serializable with Logging {
       newVertices.foreach(_._2.foreach(t => assert(!t.isNaN)))
 
       val wl = useWeightedLambda
-      val r = regParam
       val ns = numSamples
-      val regVal = newVertices.aggregate(0.0)(seqOp = (a, b) => {
-        if (isSampleId(b._1)) {
-          a
-        } else {
-          val w = b._2
-          val wd = if (wl) w.last / (ns + 1.0) else 1.0
-          var s = 0.0
-          rankIndices.foreach { i =>
-            s += pow(w(i), 2.0)
+      val regVal = if (regParam == 0.0) {
+        0.0
+      } else {
+        val sum = newVertices.aggregate(0.0)(seqOp = (a, b) => {
+          if (isSampleId(b._1)) {
+            a
+          } else {
+            val w = b._2
+            val wd = if (wl) w.last / (ns + 1.0) else 1.0
+            var s = 0.0
+            rankIndices.foreach { rankId =>
+              s += w(rankId) * w(rankId)
+            }
+            a + wd * s
           }
-          a + 0.5 * wd * r * s
-        }
-      }, _ + _)
-
-      println(f"regVal: $regVal%1.6f")
-      if (regParam != 0.0) assert(regParam != 0.0)
+        }, _ + _)
+        0.5 * regParam * sum
+      }
 
       val dataSet = GraphImpl.fromExistingRDDs(newVertices, edges)
       val margin = forward(dataSet, innerIter)
-
-      margin.foreach(_._2.foreach(t => assert(!t.isNaN)))
-
       val (_, rmse, thisMulti) = multiplier(margin, innerIter)
       val gradient = backward(dataSet, thisMulti, innerIter)
-
-      thisMulti.foreach(_._2.foreach(t => assert(!t.isNaN)))
-
-      val dd = features.join(gradient).join(direction).map { case (_, ((w, g), d)) =>
+      val dd = gradient.innerJoin(direction) { case (_, g, d) =>
         var s = 0.0
         rankIndices.foreach { rankId =>
           s += d(rankId) * g(rankId)
         }
         s
-      }.aggregate(0.0)(_ + _, _ + _)
+      }.aggregate(0.0)((a, b) => a + b._2, _ + _)
 
       margin.unpersist(blocking = false)
       thisMulti.unpersist(blocking = false)
       gradient.unpersist(blocking = false)
-      println(f"calculate: $alpha%1.6G -> $rmse%1.6G -> ${rmse + regVal}%1.6G -> $dd%1.6G")
+      println(f"calculate, alpha: $alpha%1.6G -> rmse: $rmse%1.6G -> " +
+        f"regVal: $regVal%1.6f -> rmse + regVal: ${rmse + regVal}%1.6G -> dd: $dd%1.6G ")
       (rmse + regVal, dd)
     }
   }
 
   def determineStepSize(dir: VertexRDD[VD], iter: Int): Double = {
-    val ff = functionFromSearchDirection(dir, vertices, edges)
-    val init = if (innerIter < 3) 0.1 else 1.0
-    val search = new BacktrackingLineSearch(ff.valueAt(init), enforceWolfeConditions = false,
+    val ff = new CachedDiffFunction[Double](functionFromSearchDirection(dir, vertices, edges))
+    val init = if (innerIter < 5) 0.1 else 1.0
+    val search = new BacktrackingLineSearch(maxIterations = 10, enforceWolfeConditions = false,
       enforceStrongWolfeConditions = false)
-    //    val search = new StrongWolfeLineSearch(maxZoomIter = 10, maxLineSearchIter = 10)
+    // val search = new StrongWolfeLineSearch(maxZoomIter = 10, maxLineSearchIter = 10)
     val alpha = search.minimize(ff, init)
     alpha
     // 0.1 / sqrt(iter)

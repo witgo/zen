@@ -134,7 +134,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
     val stepSize = 0.1
     val numIterations = 100
-    val regParam = 0.01
+    val regParam = 1e-2
 
     val rank = 10
     val useAdaGrad = true
