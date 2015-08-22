@@ -379,11 +379,13 @@ private[ml] abstract class MVM extends Serializable with Logging {
   }
 
   def determineStepSize(dir: VertexRDD[VD], iter: Int): Double = {
+    // if (innerIter < 2) return 1.0 / (iter + 1)
     val ff = new CachedDiffFunction[Double](functionFromSearchDirection(dir, vertices, edges))
-    val init = if (innerIter < 5) 0.1 else 1.0
-    val search = new BacktrackingLineSearch(maxIterations = 10, enforceWolfeConditions = false,
-      enforceStrongWolfeConditions = false)
+    val init = if (innerIter < 1) 0.1 else 2.0
+    // val search = new BacktrackingLineSearch(maxIterations = 10, enforceWolfeConditions = false,
+    //    enforceStrongWolfeConditions = false)
     // val search = new StrongWolfeLineSearch(maxZoomIter = 10, maxLineSearchIter = 10)
+    val search = new BacktrackingLineSearch(maxIterations = 20)
     val alpha = search.minimize(ff, init)
     alpha
     // 0.1 / sqrt(iter)
