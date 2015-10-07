@@ -33,7 +33,7 @@ import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
-  test("movieLens 100k (uid,mid,day)") {
+  ignore("movieLens 100k (uid,mid,day)") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -83,7 +83,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     println(f"Test loss: ${model.loss(testSet)}%1.4f")
   }
 
-  ignore("movieLens 100k (uid,mid) ") {
+  test("movieLens 100k (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -111,9 +111,9 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val stepSize = 0.1
-    val numIterations = 150
+    val numIterations = 1000
     val regParam = 0.1
-    val rank = 5
+    val rank = 4
     val useAdaGrad = true
     val useWeightedLambda = true
     val miniBatchFraction = 1
@@ -121,12 +121,23 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
     testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
 
-    val fm = new MVMRegression(trainSet, stepSize, views,
+    val lfm = new MVMRegression(trainSet, stepSize, views,
       regParam, 0.0, rank, useAdaGrad, useWeightedLambda, miniBatchFraction)
 
-    fm.run(numIterations)
-    val model = fm.saveModel()
-    println(f"Test loss: ${model.loss(testSet)}%1.4f")
-
+    var iter = 0
+    var model: MVMModel = null
+    while (iter < numIterations) {
+      val thisItr = if (iter < 100) {
+        math.min(50, numIterations - iter)
+      } else {
+        math.min(10, numIterations - iter)
+      }
+      iter += thisItr
+      lfm.run(thisItr)
+      model = lfm.saveModel()
+      model.factors.count()
+      val rmse = model.loss(testSet)
+      println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
+    }
   }
 }

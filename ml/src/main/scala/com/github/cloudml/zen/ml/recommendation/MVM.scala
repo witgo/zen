@@ -130,7 +130,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
+      logInfo(s"(Iteration $iter/$iterations) RMSE:                     $costSum")
       logInfo(s"End train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -181,9 +181,9 @@ private[ml] abstract class MVM extends Serializable with Logging {
         ctx.sendToSrc(m)
       }
     }, reduceInterval, TripletFields.Dst).mapValues { a =>
-      val deg = a.last
-      a.slice(0, rank).map(_ / deg)
-      // a.slice(0, rank).map(_ / thisNumSamples)
+      // val deg = a.last
+      // a.slice(0, rank).map(_ / deg)
+      a.slice(0, rank).map(_ / thisNumSamples)
     }.setName(s"gradient-$iter").persist(storageLevel)
 
     if (regParam > 0.0) {
@@ -200,24 +200,39 @@ private[ml] abstract class MVM extends Serializable with Logging {
   }
 
   private def samplingGammaDist(): VD = {
-    val dist = features.map(_._2).aggregate(new Array[Double](2 * rank))({ (arr, weight) =>
-      var i = 0
-      while (i < rank) {
-        arr(i) += 1
-        arr(i + rank) += pow(weight(i), 2)
-        i += 1
+    val rankIndices = 0 until rank
+    val viewSize = views.length
+    val mean = features.aggregate(new Array[Double](rank * viewSize))((arr, a) => {
+      val (vid, weight) = a
+      val viewId = featureId2viewId(vid, views)
+      for (i <- rankIndices) {
+        arr(i + viewId * rank) += weight(i)
       }
       arr
     }, reduceInterval)
-    val gamma = new Array[Double](rank)
+    val dist = features.aggregate(new Array[Double](2 * rank * viewSize))((arr, a) => {
+      val (vid, weight) = a
+      val viewId = featureId2viewId(vid, views)
+      for (i <- rankIndices) {
+        val offset = i + viewId * rank
+        arr(offset) += 1
+        arr(offset + rank * viewSize) += pow(weight(i) - mean(offset), 2)
+      }
+      arr
+    }, reduceInterval)
+    val gamma = new Array[Double](rank * viewSize)
     val alpha = 1.0
     val beta = 1.0
     val rand = new Well19937c(Utils.random.nextLong())
-    for (i <- gamma.indices) {
-      val shape = (alpha + dist(i) + 1.0) / 2.0
-      val scale = (beta + dist(i + rank)) / 2.0
-      val rng = new GammaDistribution(rand, shape, scale)
-      gamma(i) = 1.0 / rng.sample()
+
+    for (rankId <- rankIndices) {
+      for (viewId <- 0 until viewSize) {
+        val offset = rankId + viewId * rank
+        val shape = (alpha + dist(offset) + 1.0) / 2.0
+        val scale = (beta + dist(offset + rank * viewSize)) / 2.0
+        val rng = new GammaDistribution(rand, shape, scale)
+        gamma(offset) = 1.0 / rng.sample()
+      }
     }
     gamma
   }
@@ -226,6 +241,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
     val gradient = delta
     val rankIndices = 0 until rank
     val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
+    val epsilon = 1.0 / pow(iter + 17.0, gamma)
     val gammaDist = samplingGammaDist()
     val seed = Utils.random.nextLong()
     val rand = new Well19937c(seed)
@@ -233,11 +249,12 @@ private[ml] abstract class MVM extends Serializable with Logging {
       gradient match {
         case Some(grad) =>
           val weight = attr.clone()
+          val viewId = featureId2viewId(vid, views)
           rand.setSeed(iter * vid + seed)
           for (i <- rankIndices) {
-            weight(i) -= thisIterStepSize * grad(i) + rand.nextGaussian() * sqrt(gammaDist(i))
+            weight(i) -= thisIterStepSize * grad(i) +
+              rand.nextGaussian() * sqrt(gammaDist(i + viewId * rank))
           }
-
           weight
         case None => attr
       }
