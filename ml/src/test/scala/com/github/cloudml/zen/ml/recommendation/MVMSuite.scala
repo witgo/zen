@@ -92,7 +92,8 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
       iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
         val Array(userId, movieId, rating, timestamp) = line.split("\t")
-        (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24))
+        val gen = (1125899906842597L * timestamp.toLong).abs
+        (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24), gen)
       }
     }.persist(StorageLevel.MEMORY_AND_DISK)
     val maxUserId = movieLens.map(_._1).max + 1
@@ -100,26 +101,31 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val numFeatures = maxUserId + maxMovieId
     val views = Array(maxUserId, numFeatures).map(_.toLong)
 
-    val dataSet = movieLens.map { case (userId, movieId, rating, _) =>
+    val trainSet = movieLens.filter(t => t._5 % 5 != 3).map { case (userId, movieId, rating, _, _) =>
       val sv = BSV.zeros[Double](numFeatures)
       sv(userId) = 1.0
       sv(movieId + maxUserId) = 1.0
       sv.compact()
       new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
-    dataSet.count()
+    val testSet = movieLens.filter(t => t._5 % 5 == 3).map { case (userId, movieId, rating, _, _) =>
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv.compact()
+      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+    trainSet.count()
+    testSet.count()
     movieLens.unpersist()
 
     val stepSize = 0.1
-    val numIterations = 1000
-    val regParam = 0.1
+    val numIterations = 10000
+    val regParam = 0.2
     val rank = 4
     val useAdaGrad = true
     val useWeightedLambda = true
     val miniBatchFraction = 1
-    val Array(trainSet, testSet) = dataSet.randomSplit(Array(0.8, 0.2))
-    trainSet.persist(StorageLevel.MEMORY_AND_DISK).count()
-    testSet.persist(StorageLevel.MEMORY_AND_DISK).count()
 
     val lfm = new MVMRegression(trainSet, stepSize, views,
       regParam, 0.0, rank, useAdaGrad, useWeightedLambda, miniBatchFraction)

@@ -92,13 +92,15 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
   def epsilon: Double = 1e-6
 
-  def gamma: Double = 0.9
+  def gamma: Double = 0.51
 
   def rank: Int
 
   def useAdaGrad: Boolean
 
   def useWeightedLambda: Boolean
+
+  def maxWeightedLambda: Double = 0.2
 
   def storageLevel: StorageLevel
 
@@ -188,7 +190,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
 
     if (regParam > 0.0) {
       grad.innerJoin(features) { (vid, g, w) =>
-        val wd = if (useWeightedLambda) w.last / (numSamples + 1.0) else 1.0
+        val wd = min(if (useWeightedLambda) w.last / (numSamples + 1.0) else 1.0, maxWeightedLambda)
         for (i <- rankIndices) {
           g(i) += regParam * wd * w(i)
         }
@@ -216,7 +218,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       for (i <- rankIndices) {
         val offset = i + viewId * rank
         arr(offset) += 1
-        arr(offset + rank * viewSize) += pow(weight(i) - mean(offset), 2)
+        arr(offset + viewSize * rank) += pow(weight(i) - mean(offset), 2)
       }
       arr
     }, reduceInterval)
@@ -224,12 +226,11 @@ private[ml] abstract class MVM extends Serializable with Logging {
     val alpha = 1.0
     val beta = 1.0
     val rand = new Well19937c(Utils.random.nextLong())
-
-    for (rankId <- rankIndices) {
-      for (viewId <- 0 until viewSize) {
+    for (viewId <- 0 until viewSize) {
+      for (rankId <- rankIndices) {
         val offset = rankId + viewId * rank
-        val shape = (alpha + dist(offset) + 1.0) / 2.0
-        val scale = (beta + dist(offset + rank * viewSize)) / 2.0
+        val shape = (alpha + dist(offset)) / 2.0
+        val scale = (beta + dist(offset + viewSize * rank)) / 2.0
         val rng = new GammaDistribution(rand, shape, scale)
         gamma(offset) = 1.0 / rng.sample()
       }
@@ -240,7 +241,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
   protected def updateWeight(delta: VertexRDD[Array[Double]], iter: Int): VertexRDD[VD] = {
     val gradient = delta
     val rankIndices = 0 until rank
-    val thisIterStepSize = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
+    val tis = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
     val epsilon = 1.0 / pow(iter + 17.0, gamma)
     val gammaDist = samplingGammaDist()
     val seed = Utils.random.nextLong()
@@ -252,8 +253,8 @@ private[ml] abstract class MVM extends Serializable with Logging {
           val viewId = featureId2viewId(vid, views)
           rand.setSeed(iter * vid + seed)
           for (i <- rankIndices) {
-            weight(i) -= thisIterStepSize * grad(i) +
-              rand.nextGaussian() * sqrt(gammaDist(i + viewId * rank))
+            weight(i) -= tis * grad(i) + Utils.random.nextGaussian() *
+              sqrt(gammaDist(i + viewId * rank)) * epsilon
           }
           weight
         case None => attr
