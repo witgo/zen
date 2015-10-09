@@ -22,7 +22,7 @@ import com.github.cloudml.zen.ml.util.SparkUtils._
 import com.github.cloudml.zen.ml.util.Utils
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, Vectors}
-import org.apache.spark.mllib.optimization.Updater
+import com.github.cloudml.zen.ml.optimization._
 
 /**
  * Equilibrated Gradient Descent the paper:
