@@ -44,6 +44,10 @@
       <groupId>org.scalanlp</groupId>
       <artifactId>breeze_${scala.binary.version}</artifactId>
     </dependency>
+    <dependency>
+      <groupId>com.databricks</groupId>
+      <artifactId>spark-csv_2.10</artifactId>
+    </dependency>
     <!-- test -->
     <dependency>
       <groupId>junit</groupId>
