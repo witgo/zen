@@ -231,7 +231,7 @@ object MLP extends Logging {
     epsilon: Double): MLP = {
     val gradient = new MLPGradient(mlp.topology, mlp.innerLayers.map(_.layerType),
       mlp.dropout, batchSize)
-    val updater = new MLPEquilibratedUpdater(mlp.topology, epsilon, 0)
+    val updater = new MLPEquilibratedUpdater(mlp.topology, epsilon, 1e-2, 0)
     val optimizer = new GradientDescent(gradient, updater).
       setMiniBatchFraction(fraction).
       setNumIterations(maxNumIterations).
@@ -283,7 +283,7 @@ object MLP extends Logging {
   private[ml] def fromVector(mlp: MLP, weights: SV): Unit = {
     val structure = vectorToStructure(mlp.topology, weights)
     val layers: Array[Layer] = mlp.innerLayers
-    for (i <- 0 until structure.length) {
+    for (i <- structure.indices) {
       val (weight, bias) = structure(i)
       val layer = layers(i)
       layer.weight := weight
@@ -384,7 +384,7 @@ object MLP extends Logging {
       else {
         new ReLuLayer(numIn, numOut)
       }
-      println(s"layers($layer) = ${numIn} * ${numOut}")
+      println(s"layers($layer) = $numIn * $numOut")
     }
     layers
   }
@@ -428,7 +428,7 @@ object MLP extends Logging {
       var norm = 0D
       val nn = MLP.vectorToStructure(topology, weightsOld)
       val grads = MLP.vectorToStructure(topology, gradient)
-      for (layer <- 0 until nn.length) {
+      for (layer <- nn.indices) {
         brzAxpy(regParam, nn(layer)._1, grads(layer)._1)
         for (i <- 0 until nn(layer)._1.rows) {
           for (j <- 0 until nn(layer)._1.cols) {
@@ -537,7 +537,8 @@ private[ml] class MLPAdaGradUpdater(
 private[ml] class MLPEquilibratedUpdater(
   val topology: Array[Int],
   _epsilon: Double = 1e-6,
-  _momentum: Double = 0.9) extends EquilibratedUpdater(_epsilon, _momentum) {
+  _gamma: Double = 1e-2,
+  _momentum: Double = 0.9) extends EquilibratedUpdater(_epsilon, _gamma, _momentum) {
   override protected def l2(
     weightsOld: SV,
     gradient: SV,

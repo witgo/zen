@@ -33,6 +33,7 @@ import com.github.cloudml.zen.ml.optimization._
 @Experimental
 class EquilibratedUpdater(
   val epsilon: Double,
+  val gamma: Double,
   val momentum: Double) extends Updater {
   require(momentum >= 0 && momentum < 1)
   @transient private var etaSum: SDV = null
@@ -64,7 +65,7 @@ class EquilibratedUpdater(
 
     etaSum.synchronized {
       for (i <- 0 until grad.length) {
-        grad(i) /= (epsilon + math.sqrt(etaSum(i) / iter))
+        grad(i) = gamma * grad(i) / (epsilon + math.sqrt(etaSum(i) / iter))
       }
     }
 
