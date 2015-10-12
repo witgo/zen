@@ -48,10 +48,10 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
       val label = line.head.toDouble
       val time = line(1).toDouble.toLong.toString().substring(0, 6).toInt
       // val time = if (Utils.random.nextInt(5) == 3) 201410 else 201409
-      val features = BSV.apply(line.drop(192).map(_.toDouble))
+      val features = BDV.apply(line.drop(192).map(_.toDouble))
       (time, LabeledPoint(label, SparkUtils.fromBreeze(features)))
-    }.filter(_._2.label >= 0)
-    data.persist(StorageLevel.MEMORY_AND_DISK)
+    }.filter(_._2.label >= 0).filter(_._1 != 201410)
+    data.persist(StorageLevel.MEMORY_ONLY_SER)
   }
 
   ignore("binary classification") {
@@ -256,26 +256,26 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
           v(1) = 0.98
         }
         (features, Vectors.dense(v))
-      }.persist(StorageLevel.MEMORY_AND_DISK)
+      }.persist(StorageLevel.MEMORY_ONLY_SER)
     }
-    val trainSet = toV(data.filter(_._1 != 201410).map(_._2))
-    val testSet = toV(data.filter(_._1 == 201410).map(_._2))
+    val trainSet = toV(data.filter(_._1 != 201409).map(_._2))
+    val testSet = toV(data.filter(_._1 == 201409).map(_._2))
 
     val layer1Size = testSet.first()._1.size
     testSet.count()
     trainSet.count()
     data.unpersist()
 
-    val topology = Array(layer1Size, 400, 1000, 400, 2)
-    val dropout = Array(0.5, 0.5, 0.5, 0.0)
+    val topology = Array(layer1Size, 800, 1000, 800, 2)
+    val dropout = Array(0.0, 0.5, 0.5, 0.0)
     var mlp = new MLP(MLP.initLayers(topology), dropout)
-    mlp = MLP.train(trainSet, 40, 4000, mlp, 0.02, 0.0005, 1e-3)
+    mlp = MLP.train(trainSet, 100, 4000, mlp, 0.02, 0.005, 1e-3)
     val scoreAndLabels = testSet.map { case (features, label) =>
       val f = toBreeze(features)
       val out = mlp.predict(f.toDenseVector.asDenseMatrix.t)
       (out(0, 0), if (label(0) > 0.5) 1.0 else 0.0)
     }
-    scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
+    scoreAndLabels.persist(StorageLevel.MEMORY_ONLY_SER)
     scoreAndLabels.repartition(1).map(t => s"${t._1}\t${t._2}").
       saveAsTextFile(s"$checkpoint/mlp/${System.currentTimeMillis()}")
     val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
