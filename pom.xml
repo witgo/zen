@@ -149,6 +149,11 @@
         <artifactId>commons-math3</artifactId>
         <version>${commons.math3.version}</version>
       </dependency>
+      <dependency>
+        <groupId>com.databricks</groupId>
+        <artifactId>spark-csv_2.10</artifactId>
+        <version>1.2.0</version>
+      </dependency>
       <!-- test -->
       <dependency>
         <groupId>org.scalatest</groupId>
@@ -200,7 +205,9 @@
     <profile>
       <id>scala-2.10</id>
       <activation>
-        <property><name>!scala-2.11</name></property>
+        <property>
+          <name>!scala-2.11</name>
+        </property>
       </activation>
       <properties>
         <scala.version>2.10.4</scala.version>
@@ -509,11 +516,11 @@
             </artifactSet>
             <relocations>
               <!--<relocation>-->
-                <!--<pattern>breeze</pattern>-->
-                <!--<shadedPattern>com.github.cloudml.shaded.breeze</shadedPattern>-->
-                <!--<includes>-->
-                  <!--<include>breeze.**</include>-->
-                <!--</includes>-->
+              <!--<pattern>breeze</pattern>-->
+              <!--<shadedPattern>com.github.cloudml.shaded.breeze</shadedPattern>-->
+              <!--<includes>-->
+              <!--<include>breeze.**</include>-->
+              <!--</includes>-->
               <!--</relocation>-->
               <relocation>
                 <pattern>org.apache.commons.math3</pattern>

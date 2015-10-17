@@ -17,17 +17,43 @@
 
 package com.github.cloudml.zen.ml.recommendation
 
+import com.github.cloudml.zen.ml.neuralNetwork.{MLP, DBN}
 import com.github.cloudml.zen.ml.util._
+import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS
+import org.apache.spark.mllib.evaluation.{MulticlassMetrics, BinaryClassificationMetrics}
 import org.apache.spark.mllib.regression.LabeledPoint
 import com.google.common.io.Files
+import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
+import org.apache.spark.mllib.tree.configuration.Algo
 import org.apache.spark.mllib.util.MLUtils
+import org.apache.spark.mllib.feature.StandardScaler
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SQLContext
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum, Vector => BV}
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV, SparseVector => SSV}
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV, SparseVector => SSV, Vectors}
 import org.apache.spark.storage.StorageLevel
 
 import org.scalatest.{Matchers, FunSuite}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
+
+  def getDataWithTime(sqlContext: SQLContext): RDD[(Int, LabeledPoint)] = {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val trainFile = s"$sparkHome/data/binned_data.csv"
+    val df = sqlContext.read.format("com.databricks.spark.csv").
+      option("header", "true").option("delimiter", ",").load(trainFile)
+    // df.printSchema()
+    import com.github.cloudml.zen.ml.util.SparkUtils
+    val data = df.rdd.map(r => r.toSeq.map(_.toString).toArray).map { line =>
+      val label = line.head.toDouble
+      val time = line(1).toDouble.toLong.toString().substring(0, 6).toInt
+      // val time = if (Utils.random.nextInt(5) == 3) 201410 else 201409
+      val features = BDV.apply(line.drop(192).map(_.toDouble))
+      (time, LabeledPoint(label, SparkUtils.fromBreeze(features)))
+    }.filter(_._2.label >= 0).filter(_._1 != 201410)
+    data.persist(StorageLevel.MEMORY_ONLY_SER)
+  }
+
   ignore("binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
@@ -104,4 +130,196 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
   }
 
+  ignore("小微贷款 风控 LR") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val data = getDataWithTime(new SQLContext(sc))
+    assert(data.map(_._2.label).distinct().count() == 2)
+    println(s"data size: ${data.count()}")
+
+    val trainSet = data.filter(_._1 != 201410).map(_._2).persist(StorageLevel.MEMORY_AND_DISK)
+    val testSet = data.filter(_._1 == 201410).map(_._2).persist(StorageLevel.MEMORY_AND_DISK)
+
+    val pc = trainSet.filter(_.label == 0).count
+    val fc = trainSet.filter(_.label == 1).count
+    val ac = trainSet.count
+    println(s"$pc + $fc => $ac")
+    testSet.count()
+    trainSet.count
+    data.unpersist()
+
+    val lr = new LogisticRegressionWithLBFGS()
+    lr.setNumClasses(2).optimizer.setConvergenceTol(1e-5)
+    // .optimizer.setRegParam(1e-3)
+    val model = lr.run(trainSet).clearThreshold()
+    val scoreAndLabels = testSet.map { s =>
+      val label = s.label
+      val score = model.predict(s.features)
+      (score, label)
+    }
+
+    scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
+    scoreAndLabels.repartition(1).map(
+      t => s"${t._1}\t${t._2}").saveAsTextFile(s"$checkpoint/lr/${System.currentTimeMillis()}")
+    val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
+    println(f"Test AUC = $testAccuracy%1.6f")
+  }
+
+  ignore("小微贷款 风控 MIS") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val data = getDataWithTime(new SQLContext(sc))
+    assert(data.map(_._2.label).distinct().count() == 2)
+    println(s"data size: ${data.count()}")
+
+    val trainSet = data.filter(_._1 != 201410).map(_._2).zipWithIndex().map(_.swap)
+      .persist(StorageLevel.MEMORY_AND_DISK)
+    val testSet = data.filter(_._1 == 201410).map(_._2).zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+
+    val pc = trainSet.filter(_._2.label == 0).count
+    val fc = trainSet.filter(_._2.label == 1).count
+    val ac = trainSet.count
+    println(s"$pc + $fc => $ac")
+    testSet.count()
+    trainSet.count
+    data.unpersist()
+
+    import com.github.cloudml.zen.ml.regression.LogisticRegression
+    val model = LogisticRegression.trainMIS(trainSet, 200, 0.1, 0.0, 1e-6, true)
+    val scoreAndLabels = testSet.join(testSet.map { t =>
+      (t._1, model.predict(t._2.features))
+    }).map { case (_, (lp, score)) =>
+      (score, lp.label)
+    }
+
+    scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
+    scoreAndLabels.repartition(1).map(
+      t => s"${t._1}\t${t._2}").saveAsTextFile(s"$checkpoint/mis/${System.currentTimeMillis()}")
+    val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
+    println(f"Test AUC = $testAccuracy%1.6f")
+  }
+
+  ignore("小微贷款 风控 FM") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val data = getDataWithTime(new SQLContext(sc))
+    assert(data.map(_._2.label).distinct().count() == 2)
+    println(s"data size: ${data.count()}")
+
+    val trainSet = data.filter(_._1 != 201410).map(_._2).zipWithIndex().map(_.swap)
+      .persist(StorageLevel.MEMORY_AND_DISK)
+    val testSet = data.filter(_._1 == 201410).map(_._2).zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+
+    val pc = trainSet.filter(_._2.label == 0).count
+    val fc = trainSet.filter(_._2.label == 1).count
+    val ac = trainSet.count
+    println(s"$pc + $fc => $ac")
+    testSet.count()
+    trainSet.count
+    data.unpersist()
+
+    val model = FM.trainClassification(trainSet, 600, 0.005, (0.0, 0.0, 0.0), 20, true)
+    val scoreAndLabels = testSet.join(model.predict(testSet.map(
+      t => (t._1, t._2.features)))).map { case (_, (lp, score)) =>
+      (score, lp.label)
+    }
+
+    scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
+    scoreAndLabels.repartition(1).map(t => s"${t._1}\t${t._2}").
+      saveAsTextFile(s"$checkpoint/fm/${System.currentTimeMillis()}")
+    val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
+    println(f"Test AUC = $testAccuracy%1.6f")
+
+  }
+
+  test("小微贷款 风控 DBN") {
+    import com.github.cloudml.zen.ml.util.SparkUtils._
+
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val data = getDataWithTime(new SQLContext(sc))
+    assert(data.map(_._2.label).distinct().count() == 2)
+    println(s"data size: ${data.count()}")
+
+    def toV(rdd: RDD[LabeledPoint]): RDD[(SV, SV)] = {
+      rdd.map { case LabeledPoint(label, features) =>
+        val v = new Array[Double](2)
+        if (label > 0) {
+          v(0) = 0.98
+          v(1) = 0.02
+        } else {
+          v(0) = 0.02
+          v(1) = 0.98
+        }
+        (features, Vectors.dense(v))
+      }.persist(StorageLevel.MEMORY_ONLY_SER)
+    }
+    val trainSet = toV(data.filter(_._1 != 201409).map(_._2))
+    val testSet = toV(data.filter(_._1 == 201409).map(_._2))
+
+    val layer1Size = testSet.first()._1.size
+    testSet.count()
+    trainSet.count()
+    data.unpersist()
+
+    val topology = Array(layer1Size, 800, 1000, 800, 2)
+    val dropout = Array(0.0, 0.5, 0.5, 0.0)
+    var mlp = new MLP(MLP.initLayers(topology), dropout)
+    mlp = MLP.train(trainSet, 100, 4000, mlp, 0.02, 0.005, 1e-3)
+    val scoreAndLabels = testSet.map { case (features, label) =>
+      val f = toBreeze(features)
+      val out = mlp.predict(f.toDenseVector.asDenseMatrix.t)
+      (out(0, 0), if (label(0) > 0.5) 1.0 else 0.0)
+    }
+    scoreAndLabels.persist(StorageLevel.MEMORY_ONLY_SER)
+    scoreAndLabels.repartition(1).map(t => s"${t._1}\t${t._2}").
+      saveAsTextFile(s"$checkpoint/mlp/${System.currentTimeMillis()}")
+    val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
+    println(f"Test AUC = $testAccuracy%1.6f")
+  }
+
+  ignore("小微贷款 风控 GBDT") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val data = getDataWithTime(new SQLContext(sc))
+    assert(data.map(_._2.label).distinct().count() == 2)
+    println(s"data size: ${data.count()}")
+
+    val trainSet = data.filter(_._1 != 201410).map(_._2).persist(StorageLevel.MEMORY_AND_DISK)
+    val testSet = data.filter(_._1 == 201410).map(_._2).persist(StorageLevel.MEMORY_AND_DISK)
+
+    val pc = trainSet.filter(_.label == 0).count()
+    val fc = trainSet.filter(_.label == 1).count
+    val ac = trainSet.count()
+    println(s"$pc + $fc => $ac")
+    data.unpersist()
+
+    import org.apache.spark.mllib.tree._
+    val boostingStrategy = configuration.BoostingStrategy.defaultParams("Classification")
+    boostingStrategy.setNumIterations(30)
+    // boostingStrategy.treeStrategy.setSubsamplingRate(0.3)
+    boostingStrategy.treeStrategy.setNumClasses(2)
+    boostingStrategy.treeStrategy.setMaxDepth(9)
+
+    val model = GradientBoostedTrees.train(trainSet, boostingStrategy)
+    val scoreAndLabels = testSet.map { s =>
+      val label = s.label
+      val score = model.predict(s.features)
+      (score, label)
+    }
+
+    scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
+    val testAccuracy = new MulticlassMetrics(scoreAndLabels).precision
+    println(f"Test accuracy = $testAccuracy%1.6f")
+    scoreAndLabels.repartition(1).map(
+      t => s"${t._1}\t${t._2}").saveAsTextFile(s"$checkpoint/gbdt/${System.currentTimeMillis()}")
+
+    //    val testAccuracy = new BinaryClassificationMetrics(scoreAndLabels).areaUnderROC()
+    //    println(f"Test AUC = $testAccuracy%1.6f")
+  }
 }
