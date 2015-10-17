@@ -116,7 +116,7 @@ class MLP(
   protected[ml] def computeGradient(
     x: BDM[Double],
     label: BDM[Double],
-    epsilon: Double = 0.04): (Array[(BDM[Double], BDV[Double])], Double, Double) = {
+    epsilon: Double = 0.02): (Array[(BDM[Double], BDV[Double])], Double, Double) = {
     var input = x
     var (out, delta) = computeDelta(x, label)
 
