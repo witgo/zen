@@ -39,19 +39,29 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
   def getDataWithTime(sqlContext: SQLContext): RDD[(Int, LabeledPoint)] = {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
-    val trainFile = s"$sparkHome/data/binned_data.csv"
-    val df = sqlContext.read.format("com.databricks.spark.csv").
-      option("header", "true").option("delimiter", ",").load(trainFile)
-    // df.printSchema()
+    val trainFile = s"$sparkHome/data/1017_140331_141101.tsv"
     import com.github.cloudml.zen.ml.util.SparkUtils
-    val data = df.rdd.map(r => r.toSeq.map(_.toString).toArray).map { line =>
+    val data = sc.textFile(trainFile).filter(_.nonEmpty).
+      map(_.split("\t")).filter(_.length == 114).map { line =>
       val label = line.head.toDouble
-      val time = line(1).toDouble.toLong.toString().substring(0, 6).toInt
-      // val time = if (Utils.random.nextInt(5) == 3) 201410 else 201409
-      val features = BDV.apply(line.drop(192).map(_.toDouble))
+      val time = line(1).substring(1, 7).toInt
+      val features = BDV.apply(line.drop(2).map(_.toDouble))
       (time, LabeledPoint(label, SparkUtils.fromBreeze(features)))
     }.filter(_._2.label >= 0).filter(_._1 != 201410)
-    data.persist(StorageLevel.MEMORY_ONLY_SER)
+    val featureSummary = data.map(_._2.features).aggregate(new MultivariateOnlineSummarizer())(
+      (summary, feat) => summary.add(feat),
+      (sum1, sum2) => sum1.merge(sum2))
+
+    val max = featureSummary.max
+    val min = featureSummary.min
+
+    data.map { case (time, LabeledPoint(label, features)) =>
+      val v = SparkUtils.toBreeze(features.copy)
+      for (i <- 0 until v.length) {
+        v(i) = if (max(i) == min(i)) 0 else (v(i) - min(i)) / (max(i) - min(i))
+      }
+      (time, LabeledPoint(label, SparkUtils.fromBreeze(v)))
+    }.persist(StorageLevel.MEMORY_ONLY_SER)
   }
 
   ignore("binary classification") {

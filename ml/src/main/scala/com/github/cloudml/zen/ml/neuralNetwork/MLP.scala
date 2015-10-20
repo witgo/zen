@@ -21,6 +21,7 @@ import java.util.Random
 
 import breeze.linalg.{DenseMatrix => BDM, DenseVector => BDV, SparseVector => BSV, argmax => brzArgMax,
 axpy => brzAxpy, max => brzMax, norm => brzNorm, sum => brzSum}
+import breeze.numerics.{signum => brzSignum}
 import com.github.cloudml.zen.ml.linalg.BLAS
 import com.github.cloudml.zen.ml.util.SparkUtils
 import com.github.cloudml.zen.ml.optimization._
@@ -116,7 +117,7 @@ class MLP(
   protected[ml] def computeGradient(
     x: BDM[Double],
     label: BDM[Double],
-    epsilon: Double = 0.02): (Array[(BDM[Double], BDV[Double])], Double, Double) = {
+    epsilon: Double = 0.0): (Array[(BDM[Double], BDV[Double])], Double, Double) = {
     var input = x
     var (out, delta) = computeDelta(x, label)
 
@@ -124,7 +125,7 @@ class MLP(
     // URL: http://arxiv.org/abs/1510.04189
     if (epsilon > 0.0) {
       var sign: BDM[Double] = innerLayers.head.weight.t * delta.head
-      sign = sign.mapActiveValues(v => v.signum.toDouble)
+      sign = brzSignum(sign)
       sign :*= epsilon
       sign :+= x
       val t = computeDelta(sign, label)
