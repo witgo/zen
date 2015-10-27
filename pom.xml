@@ -66,6 +66,7 @@
     <scala.version>2.10.6</scala.version>
     <scala.binary.version>2.10</scala.binary.version>
     <commons.math3.version>3.4.1</commons.math3.version>
+    <parameterserver.version>0.1.0-SNAPSHOT</parameterserver.version>
     <PermGen>64m</PermGen>
     <MaxPermGen>512m</MaxPermGen>
     <CodeCacheSize>512m</CodeCacheSize>
@@ -114,6 +115,17 @@
         <artifactId>spark-core_${scala.binary.version}</artifactId>
         <version>${spark.version}</version>
         <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-graphx_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.parameterserver</groupId>
+        <artifactId>parameter-server</artifactId>
+        <version>${parameterserver.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
@@ -194,7 +206,9 @@
     <profile>
       <id>scala-2.10</id>
       <activation>
-        <property><name>!scala-2.11</name></property>
+        <property>
+          <name>!scala-2.11</name>
+        </property>
       </activation>
       <properties>
         <scala.version>2.10.6</scala.version>
@@ -503,11 +517,11 @@
             </artifactSet>
             <relocations>
               <!--<relocation>-->
-                <!--<pattern>breeze</pattern>-->
-                <!--<shadedPattern>com.github.cloudml.shaded.breeze</shadedPattern>-->
-                <!--<includes>-->
-                  <!--<include>breeze.**</include>-->
-                <!--</includes>-->
+              <!--<pattern>breeze</pattern>-->
+              <!--<shadedPattern>com.github.cloudml.shaded.breeze</shadedPattern>-->
+              <!--<includes>-->
+              <!--<include>breeze.**</include>-->
+              <!--</includes>-->
               <!--</relocation>-->
               <relocation>
                 <pattern>org.apache.commons.math3</pattern>
