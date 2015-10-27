@@ -195,13 +195,14 @@ object GradientDescent extends Logging {
       psClient.setEpoch(i)
       val (countSum, lossSum) = data.mapPartitionsWithIndex { case (pid, iter) =>
         val rand = new Random(pid + i * partitionsSize + 17)
+        var innerIter = 1
         var loss = 0D
         var count = 0L
         iter.grouped(batchSize).foreach { seq =>
           val w = Vectors.dense(psClient.getVector(wName).getValues.asInstanceOf[DoubleArray].getValues)
           val g = Vectors.dense(initialWeights.toArray)
           val l = gradient.compute(seq.toIterator, w, g)
-          val (updatedGrad, _) = updater.compute(w, g, stepSize, i, regParam)
+          val (updatedGrad, _) = updater.compute(w, g, stepSize, innerIter, regParam)
           val gName = s"g-$wName-${rand.nextLong().toString}"
           psClient.createVector(gName, wName)
           psClient.updateVector(gName, new DoubleArray(updatedGrad.toArray))
@@ -209,12 +210,14 @@ object GradientDescent extends Logging {
           psClient.removeMatrix(gName)
           loss += l._2
           count += l._1
+          innerIter += 1
         }
         Iterator((count, loss))
       }.reduce((c1, c2) => {
         // c: (count, loss)
         (c1._1 + c2._1, c1._2 + c2._2)
       })
+      // println(s"$i ${lossSum / countSum}")
       stochasticLossHistory.append(lossSum / countSum)
     }
 
