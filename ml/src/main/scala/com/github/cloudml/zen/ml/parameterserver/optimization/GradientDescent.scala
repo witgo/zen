@@ -192,9 +192,12 @@ object GradientDescent extends Logging {
 
     val partitionsSize = data.partitions.length
     for (i <- 1 to numIterations) {
-      psClient.setEpoch(i)
-      val (countSum, lossSum) = data.mapPartitionsWithIndex { case (pid, iter) =>
+      // psClient.setEpoch(i)
+      val (countSum, lossSum) = data.sortBy(t => Random.nextLong()).mapPartitionsWithIndex { case (pid, iter) =>
         val rand = new Random(pid + i * partitionsSize + 17)
+        val gName = s"g-$wName-${rand.nextLong().toString}"
+        psClient.createVector(gName, wName)
+
         var innerIter = 1
         var loss = 0D
         var count = 0L
@@ -203,15 +206,13 @@ object GradientDescent extends Logging {
           val g = Vectors.dense(initialWeights.toArray)
           val l = gradient.compute(seq.toIterator, w, g)
           val (updatedGrad, _) = updater.compute(w, g, stepSize, innerIter, regParam)
-          val gName = s"g-$wName-${rand.nextLong().toString}"
-          psClient.createVector(gName, wName)
           psClient.updateVector(gName, new DoubleArray(updatedGrad.toArray))
           psClient.vectorAxpby(wName, 1, gName, 1)
-          psClient.removeVector(gName)
           loss += l._2
           count += l._1
           innerIter += 1
         }
+        psClient.removeVector(gName)
         Iterator((count, loss))
       }.reduce((c1, c2) => {
         // c: (count, loss)
