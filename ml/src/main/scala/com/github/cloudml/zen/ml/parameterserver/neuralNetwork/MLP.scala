@@ -79,7 +79,9 @@ object MLP extends Logging with Loader[MLPModel] {
     maxNumIterations: Int,
     learningRate: Double,
     weightCost: Double): MLPModel = {
-    val updater = new MLPEquilibratedUpdater(nn.topology, 1e-6, 1e-2, 0)
+    // val updater = new MLPAdaGradUpdater(nn.topology, 0, 1e-8, 1, 0)
+    // val updater = new MLPEquilibratedUpdater(nn.topology, 1e-8, 1e-2, 0)
+    val updater = new MLPAdaDeltaUpdater(nn.topology, 0.95, 1e-8, 0)
     runSGD(data, nn, psMaster, updater, batchSize, maxNumIterations, learningRate, weightCost)
   }
 
@@ -353,7 +355,7 @@ private[ml] class MLPGradient(
 class MLPAdaGradUpdater(
   val topology: Array[Int],
   rho: Double = 1 - 1e-2,
-  epsilon: Double = 1e-2,
+  epsilon: Double = 1e-8,
   gamma: Double = 1e-1,
   momentum: Double = 0.0) extends AdaGradUpdater(rho, epsilon, gamma, momentum) {
   override protected def l2(
