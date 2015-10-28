@@ -207,7 +207,7 @@ object GradientDescent extends Logging {
           psClient.createVector(gName, wName)
           psClient.updateVector(gName, new DoubleArray(updatedGrad.toArray))
           psClient.vectorAxpby(wName, 1, gName, 1)
-          psClient.removeMatrix(gName)
+          psClient.removeVector(gName)
           loss += l._2
           count += l._1
           innerIter += 1
