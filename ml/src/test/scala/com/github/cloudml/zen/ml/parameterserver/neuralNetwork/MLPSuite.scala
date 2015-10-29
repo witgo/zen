@@ -31,7 +31,7 @@ class MLPSuite extends FunSuite with MnistDatasetSuite with Matchers {
     val psMaster = "witgo-pro:10010"
     val (data, numVisible) = mnistTrainDataset(5000)
     val topology = Array(numVisible, 500, 10)
-    val nn = MLP.train(data, topology, psMaster, 100, 200, learningRate = 0.1, weightCost = 0.0)
+    val nn = MLP.train(data, topology, psMaster, 20, 200, learningRate = 0.1, weightCost = 0.0)
     val (dataTest, _) = mnistTrainDataset(10000, 5000)
     println("Error: " + MLP.error(dataTest, nn, 100))
   }
