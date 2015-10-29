@@ -180,12 +180,16 @@ object GradientDescent extends Logging {
       return (initialWeights, stochasticLossHistory.toArray)
     }
 
-    val psClient = new PSClient(masterSockAddr)
     // Initialize weights as a column vector
     var weights = Vectors.dense(initialWeights.toArray)
     val randStr = Random.nextLong().toString
+
+    val psNamespace = s"n-$randStr"
+    val psClient = new PSClient(masterSockAddr)
+    psClient.setContext(psNamespace)
+
     // weights vector name
-    val wName = "w-" + randStr
+    val wName = s"w-$randStr"
     psClient.createVector(wName, true, weights.size, DataType.Double, true)
     // If initial weights are all 0, no need to update initial values
     psClient.updateVector(wName, new DoubleArray(weights.toArray))
@@ -193,9 +197,12 @@ object GradientDescent extends Logging {
     val partitionsSize = data.partitions.length
     for (i <- 1 to numIterations) {
       // psClient.setEpoch(i)
-      val (countSum, lossSum) = data.sortBy(t => Random.nextLong()).mapPartitionsWithIndex { case (pid, iter) =>
+      // .sortBy(t => Random.nextLong())
+      val (countSum, lossSum) = data.mapPartitionsWithIndex { case (pid, iter) =>
+        val psClient = new PSClient(masterSockAddr)
+        psClient.setContext(psNamespace)
         val rand = new Random(pid + i * partitionsSize + 17)
-        val gName = s"g-$wName-${rand.nextLong().toString}"
+        val gName = s"g-$randStr-${rand.nextLong().toString}"
         psClient.createVector(gName, wName)
 
         var innerIter = 1
@@ -213,6 +220,7 @@ object GradientDescent extends Logging {
           innerIter += 1
         }
         psClient.removeVector(gName)
+        psClient.close()
         Iterator((count, loss))
       }.reduce((c1, c2) => {
         // c: (count, loss)
