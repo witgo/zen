@@ -19,11 +19,10 @@ package com.github.cloudml.zen.ml.parameterserver.optimization
 
 import scala.collection.mutable.ArrayBuffer
 
-import com.github.cloudml.zen.ml.linalg.BLAS
 import org.apache.spark.annotation.{Experimental, DeveloperApi}
 import org.apache.spark.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.mllib.linalg.{Vectors, Vector}
+import org.apache.spark.mllib.linalg.{Vectors, Vector => SV, DenseVector => SDV, SparseVector => SSV}
 
 import org.parameterserver.client.{VectorReader, PSClient}
 import org.parameterserver.collect.{IntHashSet, Int2DoubleMap}
@@ -118,7 +117,7 @@ class GradientDescent(private var gradient: Gradient, private var updater: Updat
    * @return solution vector
    */
   @DeveloperApi
-  def optimize(data: RDD[(Vector, Vector)], initialWeights: Vector): Vector = {
+  def optimize(data: RDD[(SV, SV)], initialWeights: SV): SV = {
     val (weights, _) = GradientDescent.runMiniBatchSGD(
       data,
       gradient,
@@ -162,7 +161,7 @@ object GradientDescent extends Logging {
    *         stochastic loss computed for every iteration.
    */
   def runMiniBatchSGD(
-    data: RDD[(Vector, Vector)],
+    data: RDD[(SV, SV)],
     gradient: Gradient,
     updater: Updater,
     masterSockAddr: String,
@@ -170,7 +169,7 @@ object GradientDescent extends Logging {
     numIterations: Int,
     regParam: Double,
     batchSize: Int,
-    initialWeights: Vector): (Vector, Array[Double]) = {
+    initialWeights: SV): (SV, Array[Double]) = {
     val stochasticLossHistory = new ArrayBuffer[Double](numIterations)
     val numExamples = data.count()
 
@@ -182,6 +181,7 @@ object GradientDescent extends Logging {
 
     // Initialize weights as a column vector
     var weights = Vectors.dense(initialWeights.toArray)
+    val numFeatures = initialWeights.size
     val randStr = Random.nextLong().toString
 
     val psNamespace = s"n-$randStr"
@@ -194,17 +194,13 @@ object GradientDescent extends Logging {
     // If initial weights are all 0, no need to update initial values
     psClient.updateVector(wName, new DoubleArray(weights.toArray))
 
-    val partitionsSize = data.partitions.length
-    for (i <- 1 to numIterations) {
+    for (epoch <- 1 to numIterations) {
       // psClient.setEpoch(i)
       // .sortBy(t => Random.nextLong())
-      val (countSum, lossSum) = data.mapPartitionsWithIndex { case (pid, iter) =>
+      val (countSum, lossSum) = data.mapPartitions { iter =>
         val psClient = new PSClient(masterSockAddr)
         psClient.setContext(psNamespace)
-        val rand = new Random(pid + i * partitionsSize + 17)
-        val gName = s"g-$randStr-${rand.nextLong().toString}"
-        psClient.createVector(gName, wName)
-
+        var sdvIndices: Array[Int] = null
         var innerIter = 1
         var loss = 0D
         var count = 0L
@@ -213,20 +209,24 @@ object GradientDescent extends Logging {
           val g = Vectors.dense(initialWeights.toArray)
           val l = gradient.compute(seq.toIterator, w, g)
           val (updatedGrad, _) = updater.compute(w, g, stepSize, innerIter, regParam)
-          psClient.updateVector(gName, new DoubleArray(updatedGrad.toArray))
-          psClient.vectorAxpby(wName, 1, gName, 1)
+          updatedGrad match {
+            case SDV(values) =>
+              if (sdvIndices == null) sdvIndices = (0 until numFeatures).toArray
+              psClient.add2Vector(wName, sdvIndices, new DoubleArray(values))
+            case SSV(size, indices, values) =>
+              psClient.add2Vector(wName, indices, new DoubleArray(values))
+          }
           loss += l._2
           count += l._1
           innerIter += 1
         }
-        psClient.removeVector(gName)
         psClient.close()
         Iterator((count, loss))
       }.reduce((c1, c2) => {
         // c: (count, loss)
         (c1._1 + c2._1, c1._2 + c2._2)
       })
-      // println(s"$i ${lossSum / countSum}")
+      // println(f"epoch: $epoch, loss: ${lossSum / countSum}%1.8f")
       stochasticLossHistory.append(lossSum / countSum)
     }
 
