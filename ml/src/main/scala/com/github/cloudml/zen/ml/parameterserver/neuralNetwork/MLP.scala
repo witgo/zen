@@ -102,8 +102,11 @@ object MLP extends Logging with Loader[MLPModel] {
       setRegParam(weightCost).
       setStepSize(learningRate)
 
-    val trainingRDD = data
-    trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
+    val trainingRDD = if (data.getStorageLevel == StorageLevel.NONE) {
+      data.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
+    } else {
+      data
+    }
     val weights = optimizer.optimize(data, toVector(mlp))
     trainingRDD.unpersist()
     fromVector(mlp, weights)
