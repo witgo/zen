@@ -18,12 +18,13 @@
 package com.github.cloudml.zen.graphx
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{Dependency, Partition, SparkContext}
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.{TaskContext, Dependency, Partition, SparkContext}
 import org.parameterserver.client.PSClient
 
 import scala.reflect.ClassTag
 
-abstract class VertexRDD[VD](
+abstract class VertexRDD[VD: ClassTag](
   sc: SparkContext,
   deps: Seq[Dependency[_]]) extends RDD[(VertexId, VD)](sc, deps) {
 
@@ -41,5 +42,25 @@ abstract class VertexRDD[VD](
 
   override protected def getPartitions: Array[Partition] = partitionsRDD.partitions
 
-  def updateValues(data: RDD[(VertexId, VD)]): Unit
+  def updateValues(data: RDD[(VertexId, VD)]): this.type
+
+  def copy(withValues: Boolean): this.type
+
+  override def compute(split: Partition, context: TaskContext): Iterator[(VertexId, VD)] = {
+    throw new NoSuchMethodException()
+  }
+
+  override def checkpoint(): Unit = {
+    partitionsRDD.checkpoint()
+  }
+
+  override def persist(newLevel: StorageLevel): this.type = {
+    partitionsRDD.persist(newLevel)
+    this
+  }
+
+  override def unpersist(blocking: Boolean = true): this.type = {
+    partitionsRDD.unpersist(blocking)
+    this
+  }
 }

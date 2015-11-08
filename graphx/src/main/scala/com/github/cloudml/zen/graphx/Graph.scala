@@ -81,9 +81,9 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected() extends Serializabl
     fn: (PartitionID, Iterator[EdgeTriplet[VD, ED]], VertexCollector[VD, ED]) => Unit,
     tripletFields: TripletFields): Unit
 
-  def aggregateMessages(
-    fn: (EdgeTriplet[VD, ED], VertexCollector[VD, ED]) => Unit,
-    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD]
+  def aggregateMessages[VD2: ClassTag](
+    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
+    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2]
 
   def mapVertices[VD2: ClassTag](fn: (VertexId, VD) => VD2): Graph[VD2, ED]
 

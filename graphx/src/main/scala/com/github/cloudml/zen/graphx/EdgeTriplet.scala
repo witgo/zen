@@ -53,7 +53,7 @@ class EdgeTriplet[VD, ED] extends Edge[ED] {
   def otherVertexAttr(vid: VertexId): VD =
     if (srcId == vid) dstAttr
     else {
-      assert(dstId == vid);
+      assert(dstId == vid)
       srcAttr
     }
 
@@ -66,7 +66,7 @@ class EdgeTriplet[VD, ED] extends Edge[ED] {
   def vertexAttr(vid: VertexId): VD =
     if (srcId == vid) srcAttr
     else {
-      assert(dstId == vid);
+      assert(dstId == vid)
       dstAttr
     }
 
