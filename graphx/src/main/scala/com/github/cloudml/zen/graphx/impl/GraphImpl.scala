@@ -20,21 +20,22 @@ package com.github.cloudml.zen.graphx.impl
 import com.github.cloudml.zen.graphx._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
+import org.parameterserver.client.PSClient
 import org.parameterserver.protocol.matrix.{RowData, Column, Row}
 import org.parameterserver.protocol.{DoubleArray, IntArray}
 import scala.collection.mutable
 import scala.reflect.ClassTag
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
-import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils}
+import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils, CompletionIterator}
 
-class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
+class GraphImpl[VD: ClassTag, ED: ClassTag](
   @transient override val vertices: VertexRDD[VD],
   @transient override val edges: RDD[Edge[ED]]) extends Graph[VD, ED] {
 
   private var batchSize: Int = 1000
 
   override def updateVertices(data: RDD[(VertexId, VD)]): Unit = {
-    vertices.asInstanceOf[VertexRDDImpl[VD]].updateValues(data, batchSize)
+    vertices.asInstanceOf[VertexRDDImpl[VD]].updateValues(data)
   }
 
   override def map[ED2: ClassTag](
@@ -59,44 +60,47 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
     val c = triplets(tripletFields).mapPartitionsWithIndex { case (pid, iter) =>
       val edgeContext = new VertexCollectorImpl[VD, ED](psClient, vName)
       cleanFn(pid, iter, edgeContext)
+      psClient.close()
       Array(1).toIterator
     }
     c.count()
   }
 
-  override def aggregateMessages(
-    fn: (EdgeTriplet[VD, ED], VertexCollector[VD, ED]) => Unit,
-    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD] = {
+  override def aggregateMessages[VD2: ClassTag](
+    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
+    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2] = {
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val masterSockAddr = vi.masterSockAddr
+    val psMaster = vi.masterSockAddr
     val psClient = vi.psClient
     val isDense = vi.isDense
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val cleanFn = clean(fn)
-    val vName = GPSUtils.create[VD](psClient,isDense,rowSize.toInt,colSize.toInt )
+    val vName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
+
     triplets(tripletFields).foreachPartition { iter =>
-      val edgeContext = new VertexCollectorImpl[VD, ED](psClient, vName)
+      val edgeContext = new VertexCollectorImpl[VD2, ED](psClient, vName)
       iter.foreach(e => cleanFn(e, edgeContext))
+      psClient.close()
     }
-    new VertexRDDImpl[VD](vi.partitionsRDD, masterSockAddr, vName, isDense, rowSize, colSize, vi.targetStorageLevel)
+    new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, vName, isDense, rowSize, colSize, vi.targetStorageLevel)
   }
 
   override def mapVertices[VD2: ClassTag](fn: (VertexId, VD) => VD2): Graph[VD2, ED] = {
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val masterSockAddr = vi.masterSockAddr
+    val psMaster = vi.masterSockAddr
     val psClient = vi.psClient
     val isDense = vi.isDense
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val cleanFn = clean(fn)
     val vName = GPSUtils.create[VD2](psClient)
-    val newVertices = new VertexRDDImpl[VD2](vi.partitionsRDD, masterSockAddr, vName,
+    val newVertices = new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, vName,
       isDense, rowSize, colSize, vi.targetStorageLevel)
     val data = vertices.map { case (vid, value) =>
       (vid, cleanFn(vid, value))
     }
-    newVertices.updateValues(data, batchSize)
+    newVertices.updateValues(data)
     new GraphImpl[VD2, ED](newVertices, edges)
   }
 
@@ -135,7 +139,6 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
    * TODO:  临时这样问题的.
    * @param blocking
    */
-
   override def destroy(blocking: Boolean): Unit = {
     edges.unpersist(blocking)
     vertices.unpersist(blocking)
@@ -144,7 +147,6 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
   /**
    * TODO:  临时这样问题的.
    */
-
   override def checkpoint(): Unit = {
     edges.checkpoint()
     vertices.checkpoint()
@@ -165,14 +167,14 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
     val cleanFn = clean(vpred)
     val v = vertices.filter(v => cleanFn(v._1, v._2))
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val masterSockAddr = vi.masterSockAddr
+    val psMaster = vi.masterSockAddr
     val psClient = vi.psClient
     val isDense = vi.isDense
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val storageLevel = vi.targetStorageLevel
     val vName = GPSUtils.create[VD](psClient,isDense,rowSize.toInt,colSize.toInt )
-    val newVertices = new VertexRDDImpl[VD](v.map(_._1), masterSockAddr, vName, isDense,
+    val newVertices = new VertexRDDImpl[VD](v.map(_._1), psMaster, vName, isDense,
       rowSize, colSize, storageLevel)
     newVertices.updateValues(v)
     new GraphImpl[VD, ED](newVertices, newEdges)
@@ -184,7 +186,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
     edges.mapPartitionsWithIndex { (pid, iter) =>
       if (tripletFields == TripletFields.All ||
         tripletFields == TripletFields.Dst || tripletFields == TripletFields.Src) {
-        iter.grouped(batchSize).map { batchEdges =>
+        val newIter = iter.grouped(batchSize).map { batchEdges =>
           val vidSet = mutable.HashSet[Long]()
           batchEdges.foreach { e =>
             if (tripletFields == TripletFields.All) {
@@ -216,6 +218,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
             edge.toEdgeTriplet(srcAttr, dstAttr)
           }
         }.flatten
+        CompletionIterator[EdgeTriplet[VD,ED],Iterator[EdgeTriplet[VD,ED]]](newIter, psClient.close())
       } else {
         iter.map { edge =>
           val srcAttr: VD = null.asInstanceOf[VD]
@@ -226,3 +229,71 @@ class GraphImpl[VD: ClassTag, ED: ClassTag] protected(
     }
   }
 }
+
+
+object GraphImpl {
+
+  def apply[VD: ClassTag, ED: ClassTag](
+    psMaster: String,
+    edges: RDD[Edge[ED]],
+    defaultVertexAttr: VD): GraphImpl[VD, ED] = {
+    fromEdgeRDD(psMaster, edges, defaultVertexAttr)
+  }
+
+  def apply[VD: ClassTag, ED: ClassTag](
+    psMaster: String,
+    vertices: RDD[(VertexId, VD)],
+    edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
+    fromExistingRDDs(psMaster, vertices, edges)
+  }
+
+  def apply[VD: ClassTag, ED: ClassTag](
+    vertices: VertexRDD[VD],
+    edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
+    fromExistingRDDs(vertices, edges)
+  }
+
+  def fromExistingRDDs[VD: ClassTag, ED: ClassTag](
+    vertices: VertexRDD[VD],
+    edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
+    new GraphImpl[VD, ED](vertices, edges)
+  }
+
+  def fromExistingRDDs[VD: ClassTag, ED: ClassTag](
+    psMaster: String,
+    vertices: RDD[(VertexId, VD)],
+    edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
+    val ids = (vertices.map(_._1) ++ edges.flatMap(e => Array(e.srcId, e.dstId))).
+      distinct().persist(vertices.getStorageLevel)
+
+    val psClient: PSClient = new PSClient(psMaster)
+    val vdClass = implicitly[ClassTag[VD]].runtimeClass
+    var isDense: Boolean = false
+    val rowSize: Long = ids.max() + 1
+    var colSize: Long = Int.MaxValue
+    val psName = if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+      colSize = vertices.map(_._2.asInstanceOf[SV].size).max() + 1
+      isDense = !(vertices.map(_._2.asInstanceOf[SSV]).filter(_ != null).count() > 1 ||
+        vertices.map(_._2.asInstanceOf[SV].size).distinct().count() == 1)
+      GPSUtils.create[VD](psClient,isDense,rowSize.toInt, colSize.toInt)
+    } else if (vdClass == java.lang.Integer.TYPE || vdClass == java.lang.Double.TYPE) {
+      GPSUtils.create[VD](psClient, true, rowSize.toInt )
+    } else {
+      throw new IllegalArgumentException(s"Unsupported type: $vdClass")
+    }
+
+    val vertexRDD = new VertexRDDImpl[VD](ids, psMaster, psName, isDense, rowSize, colSize)
+    vertexRDD.updateValues(vertices)
+    psClient.close()
+    fromExistingRDDs(vertexRDD, edges)
+  }
+
+  def fromEdgeRDD[VD: ClassTag, ED: ClassTag](
+    psMaster: String,
+    edges: RDD[Edge[ED]],
+    defaultVertexAttr: VD): GraphImpl[VD, ED] = {
+    val vertices = edges.flatMap(e => Array(e.srcId, e.dstId)).distinct().map(t => (t, defaultVertexAttr))
+    fromExistingRDDs(psMaster, vertices, edges)
+  }
+}
+

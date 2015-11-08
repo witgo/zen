@@ -17,7 +17,6 @@
 
 package com.github.cloudml.zen.ml.parameterserver.neuralNetwork
 
-
 import com.github.cloudml.zen.ml.util.{Utils, SparkUtils, MnistDatasetSuite}
 import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM}
 import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics

@@ -17,6 +17,8 @@
 
 package com.github.cloudml.zen.graphx.impl
 
+import java.util.UUID
+
 import com.github.cloudml.zen.graphx.{VertexRDD, VertexId}
 import org.parameterserver.client.PSClient
 import org.parameterserver.protocol.matrix.{Column, Row}
@@ -28,9 +30,9 @@ import org.apache.spark._
 import org.apache.spark.rdd._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
-import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils}
+import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils, CompletionIterator}
 
-class VertexRDDImpl[VD: ClassTag] private[graphx] (
+class VertexRDDImpl[VD: ClassTag] private[graphx](
   @transient override val partitionsRDD: RDD[VertexId],
   val masterSockAddr: String,
   override val psName: String,
@@ -39,54 +41,50 @@ class VertexRDDImpl[VD: ClassTag] private[graphx] (
   override val colSize: Long,
   val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK)
   extends VertexRDD[VD](partitionsRDD.context, List(new OneToOneDependency(partitionsRDD))) {
-  override protected def getPartitions: Array[Partition] = partitionsRDD.partitions
-
-  private[graphx] override def psClient: PSClient = new PSClient(masterSockAddr)
-
   @transient protected lazy val vdTag: ClassTag[VD] = implicitly[ClassTag[VD]]
+  private[graphx] var batchSize: Int = 1000
+
+  @transient protected[graphx] def psClient: PSClient = new PSClient(masterSockAddr)
+
+  override protected def getPartitions: Array[Partition] = partitionsRDD.partitions
 
   /**
    * Provides the `RDD[(VertexId, VD)]` equivalent output.
    */
   override def compute(part: Partition, context: TaskContext): Iterator[(VertexId, VD)] = {
     val client = psClient
-    val vdClass = vdTag.runtimeClass
-    if (vdClass == java.lang.Integer.TYPE) {
-      firstParent[VertexId].iterator(part, context).map { vid =>
-        val value = client.getVector(psName, Array(vid.toInt)).asInstanceOf[IntArray].getValues.head
-        (vid, value.asInstanceOf[VD])
-      }
-    } else if (vdClass == java.lang.Double.TYPE) {
-      firstParent[VertexId].iterator(part, context).map { vid =>
-        val value = client.getVector(psName, Array(vid.toInt)).asInstanceOf[DoubleArray].getValues.head
-        (vid, value.asInstanceOf[VD])
-      }
-    } else if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
-      firstParent[VertexId].iterator(part, context).map { vid =>
-        val rowData = client.getMatrix(psName, Array(new Row(vid.toInt))).head
-        val value = if (rowData.getColumns != null) {
-          new SSV(Int.MaxValue, rowData.getColumns, rowData.getData.asInstanceOf[DoubleArray].getValues)
-        } else {
-          new SDV(rowData.getData.asInstanceOf[DoubleArray].getValues)
-        }
-        (vid, value.asInstanceOf[VD])
-      }
-    } else {
-      throw new IllegalArgumentException(s"Unsupported type: $vdClass")
-    }
+    val newIter = firstParent[VertexId].iterator(part, context).grouped(batchSize).map { ids =>
+      val values = GPSUtils.get[VD](psClient, psName, ids.map(_.toInt).toArray)
+      ids.zip(values).toIterator
+    }.flatten
+    CompletionIterator[(VertexId, VD),Iterator[(VertexId, VD)]](newIter, client.close())
   }
 
-  override def updateValues(data: RDD[(VertexId, VD)]): Unit = {
-    updateValues(data, 1000)
-  }
-
-  def updateValues(data: RDD[(VertexId, VD)], batchSize: Int): Unit = {
+  override def updateValues(data: RDD[(VertexId, VD)]): this.type = {
     data.foreachPartition { iter =>
+      val client = psClient
       iter.grouped(batchSize).foreach { p =>
         val (indices, values) = p.unzip
-        GPSUtils.batchUpadte(psClient, psName, indices.map(_.toInt).toArray, values.toArray)
+        GPSUtils.batchUpadte(client, psName, indices.map(_.toInt).toArray, values.toArray)
       }
-      psClient.close()
+      client.close()
     }
+    this
+  }
+
+  override def copy(withValues: Boolean): this.type = {
+    val newName = UUID.randomUUID().toString
+    val vdClass = vdTag.runtimeClass
+    val client = psClient
+    if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+      client.createMatrix(newName, psName)
+      if (withValues) client.matrixAdd(newName, psName)
+
+    } else {
+      client.createVector(newName, psName)
+      if (withValues) client.vectorAxpby(newName, 0, psName, 1)
+    }
+    client.close()
+    this
   }
 }
