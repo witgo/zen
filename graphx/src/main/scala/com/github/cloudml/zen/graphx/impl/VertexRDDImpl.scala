@@ -44,20 +44,20 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
   @transient protected lazy val vdTag: ClassTag[VD] = implicitly[ClassTag[VD]]
   private[graphx] var batchSize: Int = 1000
 
-  @transient protected[graphx] def psClient: PSClient = new PSClient(masterSockAddr)
+  @transient protected[graphx] def psClient(): PSClient = new PSClient(masterSockAddr)
 
   override protected def getPartitions: Array[Partition] = partitionsRDD.partitions
 
   /**
-   * Provides the `RDD[(VertexId, VD)]` equivalent output.
-   */
+    * Provides the `RDD[(VertexId, VD)]` equivalent output.
+    */
   override def compute(part: Partition, context: TaskContext): Iterator[(VertexId, VD)] = {
     val client = psClient
     val newIter = firstParent[VertexId].iterator(part, context).grouped(batchSize).map { ids =>
       val values = GPSUtils.get[VD](psClient, psName, ids.map(_.toInt).toArray)
       ids.zip(values).toIterator
     }.flatten
-    CompletionIterator[(VertexId, VD),Iterator[(VertexId, VD)]](newIter, client.close())
+    CompletionIterator[(VertexId, VD), Iterator[(VertexId, VD)]](newIter, client.close())
   }
 
   override def updateValues(data: RDD[(VertexId, VD)]): this.type = {
@@ -72,19 +72,24 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
     this
   }
 
-  override def copy(withValues: Boolean): this.type = {
+  override def copy(withValues: Boolean): VertexRDD[VD] = {
     val newName = UUID.randomUUID().toString
     val vdClass = vdTag.runtimeClass
     val client = psClient
-    if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    if (classOf[SV].isAssignableFrom(vdClass)) {
       client.createMatrix(newName, psName)
       if (withValues) client.matrixAdd(newName, psName)
-
     } else {
       client.createVector(newName, psName)
       if (withValues) client.vectorAxpby(newName, 0, psName, 1)
     }
     client.close()
-    this
+    new VertexRDDImpl[VD](partitionsRDD, masterSockAddr, newName, isDense, rowSize, colSize)
+  }
+
+  override def destroy(blocking: Boolean): Unit = {
+    val client = psClient
+    GPSUtils.remove[VD](client, psName)
+    client.close()
   }
 }

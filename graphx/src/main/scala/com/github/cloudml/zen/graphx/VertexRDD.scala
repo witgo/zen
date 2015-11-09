@@ -44,7 +44,9 @@ abstract class VertexRDD[VD: ClassTag](
 
   def updateValues(data: RDD[(VertexId, VD)]): this.type
 
-  def copy(withValues: Boolean): this.type
+  def copy(withValues: Boolean): VertexRDD[VD]
+
+  def destroy(blocking: Boolean): Unit
 
   override def compute(split: Partition, context: TaskContext): Iterator[(VertexId, VD)] = {
     throw new NoSuchMethodException()
@@ -52,6 +54,11 @@ abstract class VertexRDD[VD: ClassTag](
 
   override def checkpoint(): Unit = {
     partitionsRDD.checkpoint()
+  }
+
+  override def localCheckpoint(): this.type = {
+    partitionsRDD.localCheckpoint()
+    this
   }
 
   override def persist(newLevel: StorageLevel): this.type = {
