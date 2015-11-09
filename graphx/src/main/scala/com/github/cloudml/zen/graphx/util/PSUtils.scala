@@ -149,6 +149,7 @@ private[graphx] object PSUtils {
       v match {
         case SDV(values) =>
           rowData.setData(new DoubleArray(values))
+          rowData.setColumns(values.indices.toArray)
         case SSV(size, indices, values) =>
           rowData.setData(new DoubleArray(values))
           rowData.setColumns(indices)
@@ -185,6 +186,7 @@ private[graphx] object PSUtils {
         val sv = bdm(i, ::)
         val rowData = new RowData(i)
         rowData.setData(new DoubleArray(sv.inner.toArray))
+        rowData.setColumns((0 until sv.inner.length).toArray)
         values(i) = rowData
       }
       values

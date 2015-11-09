@@ -70,33 +70,46 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
     tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2] = {
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
+    val storageLevel = vi.targetStorageLevel
     val psMaster = vi.masterSockAddr
     val psClient = vi.psClient
-    val isDense = vi.isDense
     val rowSize = vi.rowSize
-    val colSize = vi.colSize
+    val colSize = Int.MaxValue
+    val isDense = false
     val cleanFn = clean(fn)
-    val vName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
-
+    val newName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
     triplets(tripletFields).foreachPartition { iter =>
-      val edgeContext = new VertexCollectorImpl[VD2, ED](psClient, vName)
+      val edgeContext = new VertexCollectorImpl[VD2, ED](psClient, newName)
       iter.foreach(e => cleanFn(e, edgeContext))
       psClient.close()
     }
-    new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, vName, isDense, rowSize, colSize, vi.targetStorageLevel)
+    psClient.close()
+    new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, newName, isDense, rowSize, colSize, storageLevel)
+  }
+
+  override def mapReduceTriplets[VD2: ClassTag](
+    mapFunc: EdgeTriplet[VD, ED] => Iterator[(VertexId, VD2)],
+    reduceFunc: (VD2, VD2) => VD2,
+    tripletFields: TripletFields = TripletFields.All): RDD[(VertexId, VD2)] = {
+    val cleanMapFunc = clean(mapFunc)
+    val cleanReduceFunc = clean(reduceFunc)
+    val data = triplets(tripletFields).flatMap(cleanMapFunc)
+    data.partitioner.map(partitioner => data.reduceByKey(partitioner, cleanReduceFunc)).
+      getOrElse(data.reduceByKey(cleanReduceFunc, data.partitions.length))
   }
 
   override def mapVertices[VD2: ClassTag](fn: (VertexId, VD) => VD2): Graph[VD2, ED] = {
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
     val psMaster = vi.masterSockAddr
     val psClient = vi.psClient
-    val isDense = vi.isDense
+    val isDense = false
     val rowSize = vi.rowSize
-    val colSize = vi.colSize
+    val colSize = Int.MaxValue
+    val storageLevel = vi.targetStorageLevel
     val cleanFn = clean(fn)
-    val vName = GPSUtils.create[VD2](psClient)
+    val vName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
     val newVertices = new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, vName,
-      isDense, rowSize, colSize, vi.targetStorageLevel)
+      isDense, rowSize, colSize, storageLevel)
     val data = vertices.map { case (vid, value) =>
       (vid, cleanFn(vid, value))
     }
@@ -173,7 +186,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val storageLevel = vi.targetStorageLevel
-    val vName = GPSUtils.create[VD](psClient,isDense,rowSize.toInt,colSize.toInt )
+    val vName = GPSUtils.create[VD](psClient,isDense,rowSize.toInt,colSize.toInt)
     val newVertices = new VertexRDDImpl[VD](v.map(_._1), psMaster, vName, isDense,
       rowSize, colSize, storageLevel)
     newVertices.updateValues(v)
@@ -184,19 +197,12 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     val psClient = vertices.psClient
     val vName = vertices.psName
     edges.mapPartitionsWithIndex { (pid, iter) =>
-      if (tripletFields == TripletFields.All ||
-        tripletFields == TripletFields.Dst || tripletFields == TripletFields.Src) {
+      if (tripletFields.useSrc || tripletFields.useDst) {
         val newIter = iter.grouped(batchSize).map { batchEdges =>
           val vidSet = mutable.HashSet[Long]()
           batchEdges.foreach { e =>
-            if (tripletFields == TripletFields.All) {
-              vidSet.add(e.srcId)
-              vidSet.add(e.dstId)
-            } else if (tripletFields == TripletFields.Dst) {
-              vidSet.add(e.dstId)
-            } else {
-              vidSet.add(e.srcId)
-            }
+            if (tripletFields.useSrc) vidSet.add(e.srcId)
+            if (tripletFields.useDst) vidSet.add(e.dstId)
           }
           val indices = vidSet.toArray
           val v2i = new mutable.OpenHashMap[Long, Int]()
@@ -207,14 +213,8 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
           batchEdges.map { edge =>
             var srcAttr: VD = null.asInstanceOf[VD]
             var dstAttr: VD = null.asInstanceOf[VD]
-            if (tripletFields == TripletFields.All) {
-              srcAttr = vd(v2i(edge.srcId))
-              dstAttr = vd(v2i(edge.dstId))
-            } else if (tripletFields == TripletFields.Dst) {
-              dstAttr = vd(v2i(edge.dstId))
-            } else {
-              srcAttr = vd(v2i(edge.srcId))
-            }
+            if (tripletFields.useSrc) srcAttr = vd(v2i(edge.srcId))
+            if (tripletFields.useDst) dstAttr = vd(v2i(edge.dstId))
             edge.toEdgeTriplet(srcAttr, dstAttr)
           }
         }.flatten
@@ -277,7 +277,7 @@ object GraphImpl {
         vertices.map(_._2.asInstanceOf[SV].size).distinct().count() == 1)
       GPSUtils.create[VD](psClient,isDense,rowSize.toInt, colSize.toInt)
     } else if (vdClass == java.lang.Integer.TYPE || vdClass == java.lang.Double.TYPE) {
-      GPSUtils.create[VD](psClient, true, rowSize.toInt )
+      GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
     } else {
       throw new IllegalArgumentException(s"Unsupported type: $vdClass")
     }
