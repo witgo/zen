@@ -66,26 +66,26 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     c.count()
   }
 
-  override def aggregateMessages[VD2: ClassTag](
-    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
-    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2] = {
-    val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val storageLevel = vi.targetStorageLevel
-    val psMaster = vi.masterSockAddr
-    val psClient = vi.psClient
-    val rowSize = vi.rowSize
-    val colSize = Int.MaxValue
-    val isDense = false
-    val cleanFn = clean(fn)
-    val newName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
-    triplets(tripletFields).foreachPartition { iter =>
-      val edgeContext = new VertexCollectorImpl[VD2, ED](psClient, newName)
-      iter.foreach(e => cleanFn(e, edgeContext))
-      psClient.close()
-    }
-    psClient.close()
-    new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, newName, isDense, rowSize, colSize, storageLevel)
-  }
+  //  override def aggregateMessages[VD2: ClassTag](
+  //    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
+  //    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2] = {
+  //    val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
+  //    val storageLevel = vi.targetStorageLevel
+  //    val psMaster = vi.masterSockAddr
+  //    val psClient = vi.psClient
+  //    val rowSize = vi.rowSize
+  //    val colSize = 2
+  //    val isDense = false
+  //    val cleanFn = clean(fn)
+  //    val newName = GPSUtils.create[VD2](psClient, isDense, rowSize.toInt, colSize.toInt)
+  //    triplets(tripletFields).foreachPartition { iter =>
+  //      val edgeContext = new VertexCollectorImpl[VD2, ED](psClient, newName)
+  //      iter.foreach(e => cleanFn(e, edgeContext))
+  //      psClient.close()
+  //    }
+  //    psClient.close()
+  //    new VertexRDDImpl[VD2](vi.partitionsRDD, psMaster, newName, isDense, rowSize, colSize, storageLevel)
+  //  }
 
   override def mapReduceTriplets[VD2: ClassTag](
     mapFunc: EdgeTriplet[VD, ED] => Iterator[(VertexId, VD2)],
@@ -149,17 +149,17 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
   }
 
   /**
-   * TODO:  临时这样问题的.
-   * @param blocking
-   */
+    * TODO:  临时这样问题的.
+    * @param blocking
+    */
   override def destroy(blocking: Boolean): Unit = {
     edges.unpersist(blocking)
     vertices.unpersist(blocking)
   }
 
   /**
-   * TODO:  临时这样问题的.
-   */
+    * TODO:  临时这样问题的.
+    */
   override def checkpoint(): Unit = {
     edges.checkpoint()
     vertices.checkpoint()
@@ -186,7 +186,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val storageLevel = vi.targetStorageLevel
-    val vName = GPSUtils.create[VD](psClient,isDense,rowSize.toInt,colSize.toInt)
+    val vName = GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
     val newVertices = new VertexRDDImpl[VD](v.map(_._1), psMaster, vName, isDense,
       rowSize, colSize, storageLevel)
     newVertices.updateValues(v)
@@ -209,7 +209,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
           indices.zipWithIndex.foreach { case (vid, offset) =>
             v2i(vid) = offset
           }
-          val vd = GPSUtils.get[VD](psClient,vName,indices.map(_.toInt))
+          val vd = GPSUtils.get[VD](psClient, vName, indices.map(_.toInt))
           batchEdges.map { edge =>
             var srcAttr: VD = null.asInstanceOf[VD]
             var dstAttr: VD = null.asInstanceOf[VD]
@@ -218,7 +218,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
             edge.toEdgeTriplet(srcAttr, dstAttr)
           }
         }.flatten
-        CompletionIterator[EdgeTriplet[VD,ED],Iterator[EdgeTriplet[VD,ED]]](newIter, psClient.close())
+        CompletionIterator[EdgeTriplet[VD, ED], Iterator[EdgeTriplet[VD, ED]]](newIter, psClient.close())
       } else {
         iter.map { edge =>
           val srcAttr: VD = null.asInstanceOf[VD]
@@ -271,11 +271,11 @@ object GraphImpl {
     var isDense: Boolean = false
     val rowSize: Long = ids.max() + 1
     var colSize: Long = Int.MaxValue
-    val psName = if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    val psName = if (classOf[SV].isAssignableFrom(vdClass)) {
       colSize = vertices.map(_._2.asInstanceOf[SV].size).max() + 1
       isDense = !(vertices.map(_._2.asInstanceOf[SSV]).filter(_ != null).count() > 1 ||
         vertices.map(_._2.asInstanceOf[SV].size).distinct().count() == 1)
-      GPSUtils.create[VD](psClient,isDense,rowSize.toInt, colSize.toInt)
+      GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
     } else if (vdClass == java.lang.Integer.TYPE || vdClass == java.lang.Double.TYPE) {
       GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
     } else {

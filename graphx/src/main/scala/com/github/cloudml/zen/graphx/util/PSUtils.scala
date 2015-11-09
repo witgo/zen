@@ -33,6 +33,15 @@ CSCMatrix => BSM, DenseMatrix => BDM, Matrix => BM}
 
 private[graphx] object PSUtils {
 
+  def remove[VD: ClassTag](psClient: PSClient, psName: String): Unit = {
+    val vdClass = implicitly[ClassTag[VD]].runtimeClass
+    if (classOf[SV].isAssignableFrom(vdClass)) {
+      psClient.removeMatrix(psName)
+    } else {
+      psClient.removeVector(psName)
+    }
+  }
+
   def create[VD: ClassTag](
     psClient: PSClient,
     dense: Boolean = false,
@@ -40,7 +49,7 @@ private[graphx] object PSUtils {
     columnNum: Int = Int.MaxValue): String = {
     val vdClass = implicitly[ClassTag[VD]].runtimeClass
     val name = UUID.randomUUID().toString
-    if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    if (classOf[SV].isAssignableFrom(vdClass)) {
       psClient.createMatrix(name, dense, rowNum, columnNum, DataType.Double)
     } else if (vdClass == java.lang.Integer.TYPE) {
       psClient.createVector(name, dense, rowNum, DataType.Integer)
@@ -54,14 +63,14 @@ private[graphx] object PSUtils {
 
   def update[VD: ClassTag](psClient: PSClient, psName: String, value: VD): Unit = {
     val vdClass = implicitly[ClassTag[VD]].runtimeClass
-    if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    if (classOf[SV].isAssignableFrom(vdClass)) {
       val (indices, array) = sv2DoubleArray(value.asInstanceOf[SV])
       if (indices == null) {
         psClient.updateVector(psName, array)
       } else {
         psClient.updateVector(psName, indices, array)
       }
-    } else if (vdClass == classOf[SM] || vdClass.isAssignableFrom(classOf[SM])) {
+    } else if (classOf[SM].isAssignableFrom(vdClass)) {
       val rowDatas = sm2RowData(value.asInstanceOf[SM])
       psClient.updateMatrix(psName, rowDatas)
     } else {
@@ -75,7 +84,7 @@ private[graphx] object PSUtils {
       psClient.updateVector(psName, indices, new IntArray(values.asInstanceOf[Array[Int]]))
     } else if (vdClass == java.lang.Double.TYPE) {
       psClient.updateVector(psName, indices, new DoubleArray(values.asInstanceOf[Array[Double]]))
-    } else if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    } else if (classOf[SV].isAssignableFrom(vdClass)) {
       val data = sv2RowData(indices, values.map(_.asInstanceOf[SV]))
       psClient.updateMatrix(psName, data)
     } else {
@@ -85,14 +94,14 @@ private[graphx] object PSUtils {
 
   def inc[VD: ClassTag](psClient: PSClient, psName: String, value: VD): Unit = {
     val vdClass = implicitly[ClassTag[VD]].runtimeClass
-    if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    if (classOf[SV].isAssignableFrom(vdClass)) {
       val (indices, array) = sv2DoubleArray(value.asInstanceOf[SV])
       if (indices == null) {
         psClient.updateVector(psName, array)
       } else {
         psClient.updateVector(psName, indices, array)
       }
-    } else if (vdClass == classOf[SM] || vdClass.isAssignableFrom(classOf[SM])) {
+    } else if (classOf[SM].isAssignableFrom(vdClass)) {
       val rowDatas = sm2RowData(value.asInstanceOf[SM])
       psClient.updateMatrix(psName, rowDatas)
     } else {
@@ -107,7 +116,7 @@ private[graphx] object PSUtils {
       psClient.add2Vector(psName, indices, new IntArray(values.asInstanceOf[Array[Int]]))
     } else if (vdClass == java.lang.Double.TYPE) {
       psClient.add2Vector(psName, indices, new DoubleArray(values.asInstanceOf[Array[Double]]))
-    } else if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    } else if (classOf[SV].isAssignableFrom(vdClass)) {
       val data = sv2RowData(indices, values.map(_.asInstanceOf[SV]))
       psClient.add2Matrix(psName, data)
     } else {
@@ -122,7 +131,7 @@ private[graphx] object PSUtils {
       psClient.getVector(psName, indices).asInstanceOf[IntArray].getValues.asInstanceOf[Array[VD]]
     } else if (vdClass == java.lang.Double.TYPE) {
       psClient.getVector(psName, indices).asInstanceOf[DoubleArray].getValues.asInstanceOf[Array[VD]]
-    } else if (vdClass == classOf[SV] || vdClass.isAssignableFrom(classOf[SV])) {
+    } else if (classOf[SV].isAssignableFrom(vdClass)) {
       val rows = indices.map(i => new Row(i))
       val data = psClient.getMatrix(psName, rows)
       rowData2sv(data).asInstanceOf[Array[VD]]
@@ -163,7 +172,9 @@ private[graphx] object PSUtils {
     val rowDatas = new Array[SV](data.length)
     for (i <- data.indices) {
       val rd = data(i)
-      rowDatas(i) = if (rd.getColumns == null) {
+      rowDatas(i) = if (rd.getData == null) {
+        new SSV(Int.MaxValue, Array.empty[Int], Array.empty[Double])
+      } else if (rd.getColumns == null) {
         new SDV(rd.getData.asInstanceOf[DoubleArray].getValues)
       } else {
         new SSV(Int.MaxValue, rd.getColumns, rd.getData.asInstanceOf[DoubleArray].getValues)

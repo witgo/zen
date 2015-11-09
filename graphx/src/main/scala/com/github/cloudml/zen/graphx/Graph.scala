@@ -23,16 +23,16 @@ import org.apache.spark.storage.StorageLevel
 import scala.reflect.ClassTag
 
 /**
- * The Graph abstractly represents a graph with arbitrary objects
- * associated with vertices and edges.  The graph provides basic
- * operations to access and manipulate the data associated with
- * vertices and edges as well as the underlying structure.  Like Spark
- * RDDs, the graph is a functional data-structure in which mutating
- * operations return new graphs.
- *
- * @tparam VD the vertex attribute type
- * @tparam ED the edge attribute type
- */
+  * The Graph abstractly represents a graph with arbitrary objects
+  * associated with vertices and edges.  The graph provides basic
+  * operations to access and manipulate the data associated with
+  * vertices and edges as well as the underlying structure.  Like Spark
+  * RDDs, the graph is a functional data-structure in which mutating
+  * operations return new graphs.
+  *
+  * @tparam VD the vertex attribute type
+  * @tparam ED the edge attribute type
+  */
 abstract class Graph[VD: ClassTag, ED: ClassTag] protected() extends Serializable {
 
   def vertices: VertexRDD[VD]
@@ -81,9 +81,9 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected() extends Serializabl
     fn: (PartitionID, Iterator[EdgeTriplet[VD, ED]], VertexCollector[VD, ED]) => Unit,
     tripletFields: TripletFields): Unit
 
-  def aggregateMessages[VD2: ClassTag](
-    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
-    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2]
+  //  def aggregateMessages[VD2: ClassTag](
+  //    fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
+  //    tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2]
 
   def mapReduceTriplets[VD2: ClassTag](
     mapFunc: EdgeTriplet[VD, ED] => Iterator[(VertexId, VD2)],

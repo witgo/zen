@@ -63,10 +63,10 @@ abstract class LogisticRegression(
   @transient protected var margin: RDD[(VertexId, VD)] = null
   @transient protected var gradientSum: RDD[(VertexId, VD)] = null
   @transient protected var gradient: RDD[(VertexId, VD)] = null
-  @transient protected var vertices = dataSet.vertices
   @transient protected var edges = dataSet.edges
   if (edges.sparkContext.getCheckpointDir.isDefined) {
     edges.checkpoint()
+    dataSet.vertices.checkpoint()
     edges.count()
   }
   dataSet.persist(storageLevel)
@@ -89,23 +89,20 @@ abstract class LogisticRegression(
       margin = forward(innerIter)
       gradient = backward(margin, innerIter)
       gradient = updateGradientSum(gradient, innerIter)
-
-      val tis = if (useAdaGrad) stepSize else stepSize / sqrt(iter)
-      val l1tis = stepSize / sqrt(iter)
-      vertices = updateWeight(gradient, innerIter, tis, l1tis)
-      checkpointVertices()
-      vertices.count()
+      val tis = if (useAdaGrad) stepSize else stepSize / sqrt(innerIter)
+      val l1tis = stepSize / sqrt(innerIter)
+      updateWeight(gradient, innerIter, tis, l1tis)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      // logInfo(s"train (Iteration $iter/$iterations) loss:              ${loss(margin)}")
+      println(s"train (Iteration $iter/$iterations) loss:              ${loss(margin)}")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
       unpersistVertices()
       innerIter += 1
     }
   }
 
-  protected def forward(iter: Int): RDD[(VertexId, VD)]
+  protected[ml] def forward(iter: Int): RDD[(VertexId, VD)]
 
-  protected def backward(q: RDD[(VertexId, VD)], iter: Int): RDD[(VertexId, VD)]
+  protected[ml] def backward(q: RDD[(VertexId, VD)], iter: Int): RDD[(VertexId, VD)]
 
   protected def loss(q: RDD[(VertexId, VD)]): Double
 
@@ -144,13 +141,12 @@ abstract class LogisticRegression(
   }
 
   // Updater for L1 regularized problems
-  protected def updateWeight(
+  protected[ml] def updateWeight(
     delta: RDD[(VertexId, VD)],
     iter: Int,
     thisIterStepSize: Double,
-    thisIterL1StepSize: Double): VertexRDD[Double] = {
-
-    val newW = vertices.join(delta).map { case (vid, (attr, gard)) =>
+    thisIterL1StepSize: Double): Unit = {
+    val newW = dataSet.vertices.join(delta).filter(e => isFeatureId(e._1)).map { case (vid, (attr, gard)) =>
       var weight = attr
       weight -= thisIterStepSize * gard
       if (regParam > 0.0 && weight != 0.0) {
@@ -159,8 +155,10 @@ abstract class LogisticRegression(
       }
       assert(!weight.isNaN)
       (vid, weight)
-    }
-    vertices.updateValues(newW)
+    }.persist(storageLevel)
+    newW.count()
+    dataSet.vertices.updateValues(newW)
+    newW.unpersist()
   }
 
   protected def adaGrad(
@@ -178,13 +176,6 @@ abstract class LogisticRegression(
         val newGradSum = gradSum * rho + pow(grad, 2)
         val newGrad = grad / (epsilon + sqrt(newGradSum))
         (vid, Array(newGrad, newGradSum))
-    }
-  }
-
-  protected def checkpointVertices(): Unit = {
-    val sc = vertices.sparkContext
-    if (innerIter % checkpointInterval == 0 && sc.getCheckpointDir.isDefined) {
-      vertices.checkpoint()
     }
   }
 
@@ -230,35 +221,75 @@ class LogisticRegressionMIS(
     this
   }
 
-  override protected def backward(z: RDD[(VertexId, VD)], iter: Int): RDD[(VertexId, VD)] = {
+  //  override protected[ml] def backward(z: RDD[(VertexId, VD)], iter: Int): RDD[(VertexId, VD)] = {
+  //    val q = z.mapValues { z =>
+  //      val q = 1.0 / (1.0 + exp(z))
+  //      // if (q.isInfinite || q.isNaN || q == 0.0) println(z)
+  //      assert(q != 0.0)
+  //      q
+  //    }
+  //    val vertices = dataSet.vertices
+  //    qWithLabel = vertices.copy(false).updateValues(vertices.join(q).filter(
+  //      t => isSampleId(t._1)).map { case (vid, (label, q)) =>
+  //      (vid, if (label > 0) q else -q)
+  //    })
+  //
+  //    val newDataSet = GraphImpl.fromExistingRDDs(qWithLabel, dataSet.edges)
+  //    val data = newDataSet.aggregateMessages[SV]((ctx, out) => {
+  //      val mu = Vectors.zeros(2).asInstanceOf[SDV]
+  //      // val sampleId = ctx.dstId
+  //      // val featureId = ctx.srcId
+  //      val x = ctx.attr
+  //      val qs = ctx.dstAttr
+  //      val q = qs * x
+  //      assert(q != 0.0)
+  //
+  //      if (q > 0.0) mu(0) = q else mu(1) = -q
+  //      out.incSrc(ctx, mu)
+  //    }, TripletFields.Dst)
+  //
+  //    val grad = data.map { case (vid, mu) =>
+  //      // TODO: 0.0 right?
+  //      val grad = if (epsilon == 0.0) {
+  //        if (mu(0) == 0.0 || mu(1) == 0.0) 0.0 else math.log(mu(0) / mu(1))
+  //      } else {
+  //        math.log((mu(0) + epsilon) / (mu(1) + epsilon))
+  //      }
+  //      (vid, -grad)
+  //    }.setName(s"gradient-$iter")
+  //    grad.localCheckpoint()
+  //    grad.count()
+  //    data.destroy(blocking = false)
+  //    grad
+  //  }
+
+  override protected[ml] def backward(z: RDD[(VertexId, VD)], iter: Int): RDD[(VertexId, VD)] = {
     val q = z.mapValues { z =>
       val q = 1.0 / (1.0 + exp(z))
       // if (q.isInfinite || q.isNaN || q == 0.0) println(z)
       assert(q != 0.0)
       q
     }
-    qWithLabel = vertices.copy(false).updateValues(vertices.join(q).filter(
+    val vertices = dataSet.vertices
+    qWithLabel = vertices.copy(withValues = false).updateValues(vertices.join(q).filter(
       t => isSampleId(t._1)).map { case (vid, (label, q)) =>
       (vid, if (label > 0) q else -q)
     })
-
     val newDataSet = GraphImpl.fromExistingRDDs(qWithLabel, dataSet.edges)
-    newDataSet.aggregateMessages[SV]((ctx, out) => {
-      val mu = Vectors.zeros(2).asInstanceOf[SDV]
+    val grads = newDataSet.mapReduceTriplets[Array[Double]](ctx => {
       // val sampleId = ctx.dstId
       // val featureId = ctx.srcId
       val x = ctx.attr
       val qs = ctx.dstAttr
       val q = qs * x
       assert(q != 0.0)
-
-      if (q > 0.0) {
-        mu(0) = q
+      val mu = if (q > 0.0) {
+        Array(q, 0.0)
       } else {
-       mu(1) = -q
+        Array(0.0, -q)
       }
-      out.incSrc(ctx, mu)
-    }, TripletFields.Dst).map { case (vid, mu) =>
+      Iterator((ctx.srcId, mu))
+    }, (a, b) => Array(a(0) + b(0), a(1) + b(1)), TripletFields.Dst).map { case (vid, mu) =>
       // TODO: 0.0 right?
       val grad = if (epsilon == 0.0) {
         if (mu(0) == 0.0 || mu(1) == 0.0) 0.0 else math.log(mu(0) / mu(1))
@@ -267,33 +298,53 @@ class LogisticRegressionMIS(
       }
       (vid, -grad)
     }.setName(s"gradient-$iter").persist(storageLevel)
+    grads.localCheckpoint()
+    grads.count()
+    qWithLabel.destroy(blocking = false)
+    grads
   }
 
+  //  override protected[ml] def forward(iter: Int): RDD[(VertexId, VD)] = {
+  //    dataSet.aggregateMessages[VD]((edge, out) => {
+  //      // val sampleId = edge.dstId
+  //      // val featureId = edge.srcId
+  //      val x = edge.attr
+  //      val w = edge.srcAttr
+  //      val y = edge.dstAttr
+  //      val z = y * w * x
+  //      out.incDst(edge, z)
+  //    }, TripletFields.All)
+  //  }
+
   override protected[ml] def forward(iter: Int): RDD[(VertexId, VD)] = {
-    dataSet.aggregateMessages((edge, out) => {
+
+    dataSet.mapReduceTriplets[Double](edge => {
       // val sampleId = edge.dstId
       // val featureId = edge.srcId
       val x = edge.attr
       val w = edge.srcAttr
       val y = edge.dstAttr
       val z = y * w * x
-      out.incDst(edge, z)
-    }, TripletFields.All)
+      // if(z==0) println(s"$y $w $x")
+      Iterator((edge.dstId, z))
+    }, _ + _, TripletFields.All).setName(s"q-$iter").persist(storageLevel)
   }
 
   override protected[ml] def loss(q: RDD[(VertexId, VD)]): Double = {
-    vertices.join(q).filter(t => isSampleId(t._1)).aggregate(0D)((r, t) => {
-      val (_, (y, z)) = t
+    dataSet.vertices.join(q).filter(t => isSampleId(t._1)).map { case (_, (y, z)) =>
       if (y > 0.0) {
         Utils.log1pExp(-z)
       } else {
         Utils.log1pExp(z) - z
       }
-    }, _ + _) / numSamples
+    }.reduce(_ + _) / numSamples
   }
 
   override protected def unpersistVertices(): Unit = {
-    if (qWithLabel != null) qWithLabel.unpersist(blocking = false)
+    if (qWithLabel != null) {
+      qWithLabel.unpersist(blocking = false)
+      qWithLabel.destroy(blocking = false)
+    }
     super.unpersistVertices()
   }
 }
@@ -303,19 +354,19 @@ object LogisticRegression {
   private[ml] type VD = Double
 
   /**
-   * Modified Iterative Scaling
-   * The referenced paper:
-   * A comparison of numerical optimizers for logistic regression
-   * http://research.microsoft.com/en-us/um/people/minka/papers/logreg/minka-logreg.pdf
-   * @param input training data, feature value must >= 0, label is either 0 or 1 (binary classification)
-   * @param numIterations maximum number of iterations
-   * @param stepSize  step size, recommend to be in value range 0.1 - 1.0
-   * @param regParam  L1 Regularization
-   * @param epsilon   smoothing parameter, 1e-4 - 1e-6
-   * @param useAdaGrad  adaptive step size, recommend to be true
-   * @param storageLevel recommendation configuration: MEMORY_AND_DISK for small/middle-scale training data,
-   *                     and DISK_ONLY for super-large-scale data
-   */
+    * Modified Iterative Scaling
+    * The referenced paper:
+    * A comparison of numerical optimizers for logistic regression
+    * http://research.microsoft.com/en-us/um/people/minka/papers/logreg/minka-logreg.pdf
+    * @param input training data, feature value must >= 0, label is either 0 or 1 (binary classification)
+    * @param numIterations maximum number of iterations
+    * @param stepSize  step size, recommend to be in value range 0.1 - 1.0
+    * @param regParam  L1 Regularization
+    * @param epsilon   smoothing parameter, 1e-4 - 1e-6
+    * @param useAdaGrad  adaptive step size, recommend to be true
+    * @param storageLevel recommendation configuration: MEMORY_AND_DISK for small/middle-scale training data,
+    *                     and DISK_ONLY for super-large-scale data
+    */
   def trainMIS(
     input: RDD[(Long, LabeledPoint)],
     psMaster: String,
