@@ -16,12 +16,10 @@
  */
 package com.github.cloudml.zen.ml.parameterserver.regression
 
-import com.github.cloudml.zen.ml.DBHPartitioner
 import com.github.cloudml.zen.ml.util.SparkUtils._
 import com.github.cloudml.zen.ml.util.Utils
 import com.github.cloudml.zen.graphx._
-import org.apache.spark.annotation.Experimental
-import com.github.cloudml.zen.graphx.impl.{GraphImpl}
+import com.github.cloudml.zen.graphx.impl.GraphImpl
 import org.apache.spark.mllib.classification.LogisticRegressionModel
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV, Vectors}
 import org.apache.spark.mllib.regression.{GeneralizedLinearModel, LabeledPoint}
@@ -66,7 +64,6 @@ abstract class LogisticRegression(
   @transient protected var gradientSum: RDD[(VertexId, VD)] = null
   @transient protected var gradient: RDD[(VertexId, VD)] = null
   @transient protected var vertices = dataSet.vertices
-  @transient protected var previousVertices = vertices
   @transient protected var edges = dataSet.edges
   if (edges.sparkContext.getCheckpointDir.isDefined) {
     edges.checkpoint()
@@ -89,7 +86,6 @@ abstract class LogisticRegression(
     for (iter <- 1 to iterations) {
       logInfo(s"Start train (Iteration $iter/$iterations)")
       val startedAt = System.nanoTime()
-      previousVertices = dataSet.vertices
       margin = forward(innerIter)
       gradient = backward(margin, innerIter)
       gradient = updateGradientSum(gradient, innerIter)
@@ -201,7 +197,6 @@ abstract class LogisticRegression(
 
 
   protected def unpersistVertices(): Unit = {
-    if (previousVertices != null) previousVertices.unpersist(blocking = false)
     if (gradient != null) gradient.unpersist(blocking = false)
     if (margin != null) margin.unpersist(blocking = false)
   }
@@ -246,15 +241,15 @@ class LogisticRegressionMIS(
       t => isSampleId(t._1)).map { case (vid, (label, q)) =>
       (vid, if (label > 0) q else -q)
     })
-    // println(s"------------${qWithLabel.filter(_._2 != 0).count}")
-    GraphImpl.fromExistingRDDs(qWithLabel, dataSet.edges).aggregateMessages[SV]((ctx,out) => {
+
+    val newDataSet = GraphImpl.fromExistingRDDs(qWithLabel, dataSet.edges)
+    newDataSet.aggregateMessages[SV]((ctx, out) => {
       val mu = Vectors.zeros(2).asInstanceOf[SDV]
       // val sampleId = ctx.dstId
       // val featureId = ctx.srcId
       val x = ctx.attr
       val qs = ctx.dstAttr
       val q = qs * x
-     // if(q == 0) println(s"$q => $qs")
       assert(q != 0.0)
 
       if (q > 0.0) {
@@ -262,11 +257,11 @@ class LogisticRegressionMIS(
       } else {
        mu(1) = -q
       }
-      out.incSrc(ctx,mu)
-    },TripletFields.Dst).map { case (vid, mu) =>
+      out.incSrc(ctx, mu)
+    }, TripletFields.Dst).map { case (vid, mu) =>
       // TODO: 0.0 right?
       val grad = if (epsilon == 0.0) {
-        if (mu.min == 0.0) 0.0 else math.log(mu(0) / mu(1))
+        if (mu(0) == 0.0 || mu(1) == 0.0) 0.0 else math.log(mu(0) / mu(1))
       } else {
         math.log((mu(0) + epsilon) / (mu(1) + epsilon))
       }
@@ -282,7 +277,6 @@ class LogisticRegressionMIS(
       val w = edge.srcAttr
       val y = edge.dstAttr
       val z = y * w * x
-      assert(!z.isNaN)
       out.incDst(edge, z)
     }, TripletFields.All)
   }
@@ -346,16 +340,20 @@ object LogisticRegression {
     psMater: String,
     input: RDD[(VertexId, LabeledPoint)],
     storageLevel: StorageLevel): Graph[VD, ED] = {
-    val vertices = input.map { case (sampleId, labelPoint) =>
-      (sampleId2VertexId(sampleId), labelPoint.label)
-    }.persist(storageLevel)
-
     val edges = input.flatMap { case (sampleId, labelPoint) =>
       labelPoint.features.activeIterator.filter(_._2 != 0.0).map { case (featureId, value) =>
         Edge(featureId2VertexId(featureId), sampleId2VertexId(sampleId), value)
       }
     }.persist(storageLevel)
 
+    val vertices = (input.map { case (sampleId, labelPoint) =>
+      // sample point
+      (sampleId2VertexId(sampleId), labelPoint.label)
+    } ++ edges.map(_.srcId).distinct().map { featureId =>
+      // parameter point
+      val parms = Utils.random.nextGaussian() * 1e-2
+      (featureId2VertexId(featureId), parms)
+    }).persist(storageLevel)
     val newDataSet = GraphImpl.fromExistingRDDs(psMater, vertices, edges)
     newDataSet.persist(storageLevel)
     newDataSet.vertices.count()

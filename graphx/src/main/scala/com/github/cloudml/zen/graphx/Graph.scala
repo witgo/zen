@@ -85,6 +85,11 @@ abstract class Graph[VD: ClassTag, ED: ClassTag] protected() extends Serializabl
     fn: (EdgeTriplet[VD, ED], VertexCollector[VD2, ED]) => Unit,
     tripletFields: TripletFields = TripletFields.All): VertexRDD[VD2]
 
+  def mapReduceTriplets[VD2: ClassTag](
+    mapFunc: EdgeTriplet[VD, ED] => Iterator[(VertexId, VD2)],
+    reduceFunc: (VD2, VD2) => VD2,
+    tripletFields: TripletFields = TripletFields.All): RDD[(VertexId, VD2)]
+
   def mapVertices[VD2: ClassTag](fn: (VertexId, VD) => VD2): Graph[VD2, ED]
 
   def mapEdges[ED2: ClassTag](fn: Edge[ED] => ED2): Graph[VD, ED2] = {
