@@ -47,7 +47,7 @@
     </dependency>
     <dependency>
       <groupId>org.parameterserver</groupId>
-      <artifactId>parameter-server</artifactId>
+      <artifactId>psclient</artifactId>
     </dependency>
     <dependency>
       <groupId>org.scalanlp</groupId>

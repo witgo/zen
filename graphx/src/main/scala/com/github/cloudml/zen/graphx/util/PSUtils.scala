@@ -19,16 +19,16 @@ package com.github.cloudml.zen.graphx.util
 
 import java.util.UUID
 
+import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
+import org.apache.spark.mllib.linalg.{DenseMatrix => SDM, DenseVector => SDV, Matrix => SM, SparseMatrix => SSM, SparseVector => SSV, Vector => SV}
 import org.parameterserver.client.PSClient
+import org.parameterserver.protocol.matrix.{Row, RowData}
 import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => PSV, Vector => PV}
-import scala.collection.mutable.ArrayBuffer
-import org.parameterserver.protocol.matrix.{RowData, Column, Row}
 import org.parameterserver.protocol.{DataType, DoubleArray, IntArray}
+import org.parameterserver.{Configuration => PSConf}
+
+import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV,
-DenseMatrix => SDM, SparseMatrix => SSM, Matrix => SM}
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV,
-CSCMatrix => BSM, DenseMatrix => BDM, Matrix => BM}
 
 private[graphx] object PSUtils {
 
@@ -223,6 +223,10 @@ private[graphx] object PSUtils {
         rowData
       }
     }
+  }
+
+  def createPSClient(conf: PSConf = null): PSClient = {
+    new PSClient(if (conf == null) new PSConf(true) else conf)
   }
 
 }

@@ -99,7 +99,6 @@ class MISSuite extends FunSuite with SharedSparkContext with Matchers {
   test("MIS") {
     val zenHome = sys.props.getOrElse("zen.test.home", fail("zen.test.home is not set!"))
     val dataSetFile = s"$zenHome/data/binary_classification_data.txt"
-    val psMaster = "witgo-pro:10010"
     val dataSet = MLUtils.loadLibSVMFile(sc, dataSetFile)
     val max = dataSet.map(_.features.activeValuesIterator.map(_.abs).sum + 1L).max
 
@@ -112,7 +111,7 @@ class MISSuite extends FunSuite with SharedSparkContext with Matchers {
       (id, LabeledPoint(newLabel, features))
     }.persist()
     trainDataSet.count()
-    val nlr = new NLR(trainDataSet, psMaster, stepSize, regParam, useAdaGrad)
+    val nlr = new NLR(trainDataSet, stepSize, regParam, useAdaGrad)
 
     nlr.run(100)
 

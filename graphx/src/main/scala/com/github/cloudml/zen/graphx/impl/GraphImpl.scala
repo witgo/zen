@@ -18,16 +18,15 @@
 package com.github.cloudml.zen.graphx.impl
 
 import com.github.cloudml.zen.graphx._
+import com.github.cloudml.zen.graphx.util.{CompletionIterator, PSUtils => GPSUtils}
 import org.apache.spark.TaskContext
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.parameterserver.client.PSClient
-import org.parameterserver.protocol.matrix.{RowData, Column, Row}
-import org.parameterserver.protocol.{DoubleArray, IntArray}
+
 import scala.collection.mutable
 import scala.reflect.ClassTag
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
-import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils, CompletionIterator}
 
 class GraphImpl[VD: ClassTag, ED: ClassTag](
   @transient override val vertices: VertexRDD[VD],
@@ -103,14 +102,13 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
 
   override def mapVertices[VD2: ClassTag](fn: (VertexId, VD) => VD2): Graph[VD2, ED] = {
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val psMaster = vi.masterSockAddr
     val partitionsRDD = vi.partitionsRDD
     val rowSize = vi.rowSize
     val cleanFn = clean(fn)
     val data = vertices.map { case (vid, value) =>
       (vid, cleanFn(vid, value))
     }
-    val newVertices = GraphImpl.vertices2vertexRDD[VD2](psMaster, data, partitionsRDD, rowSize)
+    val newVertices = GraphImpl.vertices2vertexRDD[VD2](data, partitionsRDD, rowSize)
     new GraphImpl[VD2, ED](newVertices, edges)
   }
 
@@ -178,13 +176,13 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     val cleanFn = clean(vpred)
     val v = vertices.filter(v => cleanFn(v._1, v._2))
     val vi = vertices.asInstanceOf[VertexRDDImpl[VD]]
-    val psMaster = vi.masterSockAddr
+
     val psClient = vi.psClient
     val isDense = vi.isDense
     val rowSize = vi.rowSize
     val colSize = vi.colSize
     val vName = GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
-    val newVertices = new VertexRDDImpl[VD](v.map(_._1), psMaster, vName, isDense, rowSize, colSize)
+    val newVertices = new VertexRDDImpl[VD](v.map(_._1), vName, isDense, rowSize, colSize)
     newVertices.updateValues(v)
     new GraphImpl[VD, ED](newVertices, newEdges)
   }
@@ -229,17 +227,15 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
 object GraphImpl {
 
   def apply[VD: ClassTag, ED: ClassTag](
-    psMaster: String,
     edges: RDD[Edge[ED]],
     defaultVertexAttr: VD): GraphImpl[VD, ED] = {
-    fromEdgeRDD(psMaster, edges, defaultVertexAttr)
+    fromEdgeRDD(edges, defaultVertexAttr)
   }
 
   def apply[VD: ClassTag, ED: ClassTag](
-    psMaster: String,
     vertices: RDD[(VertexId, VD)],
     edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
-    fromExistingRDDs(psMaster, vertices, edges)
+    fromExistingRDDs(vertices, edges)
   }
 
   def apply[VD: ClassTag, ED: ClassTag](
@@ -255,30 +251,27 @@ object GraphImpl {
   }
 
   def fromExistingRDDs[VD: ClassTag, ED: ClassTag](
-    psMaster: String,
     vertices: RDD[(VertexId, VD)],
     edges: RDD[Edge[ED]]): GraphImpl[VD, ED] = {
     val ids = (vertices.map(_._1) ++ edges.flatMap(e => Array(e.srcId, e.dstId))).
       distinct().persist(vertices.getStorageLevel)
-    val vertexRDD = vertices2vertexRDD(psMaster, vertices, ids)
+    val vertexRDD = vertices2vertexRDD(vertices, ids)
     fromExistingRDDs(vertexRDD, edges)
   }
 
   def fromEdgeRDD[VD: ClassTag, ED: ClassTag](
-    psMaster: String,
     edges: RDD[Edge[ED]],
     defaultVertexAttr: VD): GraphImpl[VD, ED] = {
     val vertices = edges.flatMap(e => Array(e.srcId, e.dstId)).distinct().map(t => (t, defaultVertexAttr))
-    fromExistingRDDs(psMaster, vertices, edges)
+    fromExistingRDDs(vertices, edges)
   }
 
   private[graphx] def vertices2vertexRDD[VD: ClassTag](
-    psMaster: String,
     vertices: RDD[(VertexId, VD)],
     partitionsRDD: RDD[VertexId] = null,
     rowSize: Long = -1, colSize: Long = -1): VertexRDD[VD] = {
     val vdClass = implicitly[ClassTag[VD]].runtimeClass
-    val psClient: PSClient = new PSClient(psMaster)
+    val psClient: PSClient = GPSUtils.createPSClient()
     val ids = if (partitionsRDD == null) vertices.map(_._1) else partitionsRDD
     var isDense: Boolean = false
     val rowNum: Long = if (rowSize > 0) rowSize else ids.max() + 1
@@ -293,7 +286,7 @@ object GraphImpl {
     } else {
       throw new IllegalArgumentException(s"Unsupported type: $vdClass")
     }
-    val vertexRDD = new VertexRDDImpl[VD](ids, psMaster, psName, isDense, rowNum, colNum)
+    val vertexRDD = new VertexRDDImpl[VD](ids, psName, isDense, rowNum, colNum)
     vertexRDD.updateValues(vertices)
     psClient.close()
     vertexRDD

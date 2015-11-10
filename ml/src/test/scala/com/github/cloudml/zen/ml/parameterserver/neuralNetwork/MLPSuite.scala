@@ -17,20 +17,16 @@
 
 package com.github.cloudml.zen.ml.parameterserver.neuralNetwork
 
-import com.github.cloudml.zen.ml.util.{Utils, SparkUtils, MnistDatasetSuite}
-import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM}
-import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+import breeze.linalg.{DenseMatrix => BDM, DenseVector => BDV}
+import com.github.cloudml.zen.ml.util.MnistDatasetSuite
 import org.apache.spark.mllib.linalg.{Vector => SV}
-import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.util.MLUtils
 import org.scalatest.{FunSuite, Matchers}
 
 class MLPSuite extends FunSuite with MnistDatasetSuite with Matchers {
   test("MLP") {
-    val psMaster = "witgo-pro:10010"
     val (data, numVisible) = mnistTrainDataset(5000)
     val topology = Array(numVisible, 500, 10)
-    val nn = MLP.train(data, topology, psMaster, 100, 300, learningRate = 0.1, weightCost = 0.0)
+    val nn = MLP.train(data, topology, 100, 300, learningRate = 0.1, weightCost = 0.0)
     val (dataTest, _) = mnistTrainDataset(10000, 5000)
     println("Error: " + MLP.error(dataTest, nn, 100))
   }

@@ -19,22 +19,18 @@ package com.github.cloudml.zen.graphx.impl
 
 import java.util.UUID
 
-import com.github.cloudml.zen.graphx.{VertexRDD, VertexId}
+import com.github.cloudml.zen.graphx.util.{CompletionIterator, PSUtils => GPSUtils}
+import com.github.cloudml.zen.graphx.{VertexId, VertexRDD}
+import org.apache.spark._
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
+import org.apache.spark.rdd._
 import org.parameterserver.client.PSClient
-import org.parameterserver.protocol.matrix.{Column, Row}
-import org.parameterserver.protocol.{DoubleArray, IntArray}
+import org.parameterserver.{Configuration => PSConf}
 
 import scala.reflect.ClassTag
 
-import org.apache.spark._
-import org.apache.spark.rdd._
-import org.apache.spark.storage.StorageLevel
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
-import com.github.cloudml.zen.graphx.util.{PSUtils => GPSUtils, CompletionIterator}
-
 class VertexRDDImpl[VD: ClassTag] private[graphx](
   @transient override val partitionsRDD: RDD[VertexId],
-  val masterSockAddr: String,
   override val psName: String,
   override val isDense: Boolean,
   override val rowSize: Long,
@@ -42,8 +38,11 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
   extends VertexRDD[VD](partitionsRDD.context, List(new OneToOneDependency(partitionsRDD))) {
   @transient protected lazy val vdTag: ClassTag[VD] = implicitly[ClassTag[VD]]
   private[graphx] var batchSize: Int = 1000
+  @transient protected lazy val PSConf = new PSConf(true)
 
-  @transient protected[graphx] def psClient(): PSClient = new PSClient(masterSockAddr)
+  @transient protected[graphx] def psClient(): PSClient = {
+    new PSClient(PSConf)
+  }
 
   override protected def getPartitions: Array[Partition] = partitionsRDD.partitions
 
@@ -83,7 +82,7 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
       if (withValues) client.vectorAxpby(newName, 0, psName, 1)
     }
     client.close()
-    new VertexRDDImpl[VD](partitionsRDD, masterSockAddr, newName, isDense, rowSize, colSize)
+    new VertexRDDImpl[VD](partitionsRDD, newName, isDense, rowSize, colSize)
   }
 
   override def destroy(blocking: Boolean): Unit = {

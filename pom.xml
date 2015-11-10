@@ -123,7 +123,7 @@
       </dependency>
       <dependency>
         <groupId>org.parameterserver</groupId>
-        <artifactId>parameter-server</artifactId>
+        <artifactId>psclient</artifactId>
         <version>${parameterserver.version}</version>
       </dependency>
       <dependency>

@@ -17,18 +17,17 @@
 
 package com.github.cloudml.zen.ml.parameterserver.neuralNetwork
 
-import breeze.linalg.{DenseMatrix => BDM, DenseVector => BDV, SparseVector => BSV, argmax => brzArgMax,
-axpy => brzAxpy, max => brzMax, norm => brzNorm, sum => brzSum}
+import breeze.linalg.{DenseMatrix => BDM, DenseVector => BDV, SparseVector => BSV, argmax => brzArgMax, axpy => brzAxpy, max => brzMax, norm => brzNorm, sum => brzSum}
 import com.github.cloudml.zen.ml.linalg.BLAS
-import com.github.cloudml.zen.ml.neuralNetwork.{ReLuLayer, SoftMaxLayer, Layer, MLPModel}
-import com.github.cloudml.zen.ml.util.{LoaderUtils, SparkUtils}
+import com.github.cloudml.zen.ml.neuralNetwork.{Layer, MLPModel, ReLuLayer, SoftMaxLayer}
 import com.github.cloudml.zen.ml.parameterserver.optimization._
-import org.apache.spark.{SparkContext, Logging}
+import com.github.cloudml.zen.ml.util.{LoaderUtils, SparkUtils}
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.util.Loader
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.{Logging, SparkContext}
 
 @Experimental
 object MLP extends Logging with Loader[MLPModel] {
@@ -40,41 +39,37 @@ object MLP extends Logging with Loader[MLPModel] {
   def train(
     data: RDD[(SV, SV)],
     topology: Array[Int],
-    psMaster: String,
     batchSize: Int,
     numIteration: Int,
     learningRate: Double,
     weightCost: Double): MLPModel = {
-    train(data, new MLPModel(topology), psMaster, batchSize, numIteration, learningRate, weightCost)
+    train(data, new MLPModel(topology), batchSize, numIteration, learningRate, weightCost)
   }
 
   def train(
     data: RDD[(SV, SV)],
     nn: MLPModel,
-    psMaster: String,
     batchSize: Int,
     numIteration: Int,
     learningRate: Double,
     weightCost: Double): MLPModel = {
-    runSGD(data, nn, psMaster, batchSize, numIteration, learningRate, weightCost)
+    runSGD(data, nn, batchSize, numIteration, learningRate, weightCost)
   }
 
   def runSGD(
     trainingRDD: RDD[(SV, SV)],
     topology: Array[Int],
-    psMaster: String,
     batchSize: Int,
     maxNumIterations: Int,
     learningRate: Double,
     weightCost: Double): MLPModel = {
     val nn = new MLPModel(topology)
-    runSGD(trainingRDD, nn, psMaster, batchSize, maxNumIterations, learningRate, weightCost)
+    runSGD(trainingRDD, nn, batchSize, maxNumIterations, learningRate, weightCost)
   }
 
   def runSGD(
     data: RDD[(SV, SV)],
     nn: MLPModel,
-    psMaster: String,
     batchSize: Int,
     maxNumIterations: Int,
     learningRate: Double,
@@ -82,21 +77,20 @@ object MLP extends Logging with Loader[MLPModel] {
     // val updater = new MLPAdaGradUpdater(nn.topology, 0, 1e-8, 1, 0)
     // val updater = new MLPEquilibratedUpdater(nn.topology, 1e-8, 1e-2, 0)
     val updater = new MLPAdaDeltaUpdater(nn.topology, 0.95, 1e-8, 0)
-    runSGD(data, nn, psMaster, updater, batchSize, maxNumIterations, learningRate, weightCost)
+    runSGD(data, nn, updater, batchSize, maxNumIterations, learningRate, weightCost)
   }
 
   @Experimental
   def runSGD(
     data: RDD[(SV, SV)],
     mlp: MLPModel,
-    psMaster: String,
     updater: Updater,
     batchSize: Int,
     maxNumIterations: Int,
     learningRate: Double,
     weightCost: Double): MLPModel = {
     val gradient = new MLPGradient(mlp.topology, mlp.innerLayers.map(_.layerType), mlp.dropout)
-    val optimizer = new GradientDescent(gradient, updater, psMaster).
+    val optimizer = new GradientDescent(gradient, updater).
       setMiniBatch(batchSize).
       setNumIterations(maxNumIterations).
       setRegParam(weightCost).
