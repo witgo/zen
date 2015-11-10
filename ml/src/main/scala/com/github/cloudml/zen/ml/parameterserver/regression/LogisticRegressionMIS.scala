@@ -300,7 +300,6 @@ class LogisticRegressionMIS(
     }.setName(s"gradient-$iter").persist(storageLevel)
     grads.localCheckpoint()
     grads.count()
-    qWithLabel.destroy(blocking = false)
     grads
   }
 
