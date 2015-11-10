@@ -20,9 +20,8 @@ package com.github.cloudml.zen.graphx.util
 import java.util.UUID
 
 import org.parameterserver.client.PSClient
+import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => PSV, Vector => PV}
 import scala.collection.mutable.ArrayBuffer
-import scala.reflect.ClassTag
-import com.github.cloudml.zen.graphx._
 import org.parameterserver.protocol.matrix.{RowData, Column, Row}
 import org.parameterserver.protocol.{DataType, DoubleArray, IntArray}
 import scala.reflect.ClassTag
@@ -157,11 +156,9 @@ private[graphx] object PSUtils {
       val rowData = new RowData(r)
       v match {
         case SDV(values) =>
-          rowData.setData(new DoubleArray(values))
-          rowData.setColumns(values.indices.toArray)
+          rowData.setData(new PDV(new DoubleArray(values)))
         case SSV(size, indices, values) =>
-          rowData.setData(new DoubleArray(values))
-          rowData.setColumns(indices)
+          rowData.setData(new PSV(size, indices, new DoubleArray(values)))
       }
       rowDatas(i) = rowData
     }
@@ -172,12 +169,15 @@ private[graphx] object PSUtils {
     val rowDatas = new Array[SV](data.length)
     for (i <- data.indices) {
       val rd = data(i)
-      rowDatas(i) = if (rd.getData == null) {
+      val pv = rd.getData
+      rowDatas(i) = if (pv == null || pv.getValues == null) {
         new SSV(Int.MaxValue, Array.empty[Int], Array.empty[Double])
-      } else if (rd.getColumns == null) {
-        new SDV(rd.getData.asInstanceOf[DoubleArray].getValues)
+      } else if (pv.isInstanceOf[PDV]) {
+        val pdv = pv.asInstanceOf[PDV]
+        new SDV(pdv.getValues.asInstanceOf[DoubleArray].getValues)
       } else {
-        new SSV(Int.MaxValue, rd.getColumns, rd.getData.asInstanceOf[DoubleArray].getValues)
+        val psv = pv.asInstanceOf[PSV]
+        new SSV(psv.getSize, psv.getIndices, psv.getValues.asInstanceOf[DoubleArray].getValues)
       }
     }
     rowDatas
@@ -196,8 +196,8 @@ private[graphx] object PSUtils {
       values.indices.foreach { i =>
         val sv = bdm(i, ::)
         val rowData = new RowData(i)
-        rowData.setData(new DoubleArray(sv.inner.toArray))
-        rowData.setColumns((0 until sv.inner.length).toArray)
+        val pdv = new PDV(new DoubleArray(sv.inner.toArray))
+        rowData.setData(pdv)
         values(i) = rowData
       }
       values
@@ -217,9 +217,9 @@ private[graphx] object PSUtils {
       }
       buff.zipWithIndex.filter(_._1.nonEmpty).map { case (b, i) =>
         val rowData = new RowData(i)
-        val d = b.toArray.unzip
-        rowData.setData(new DoubleArray(d._2.toArray))
-        rowData.setColumns(d._1.toArray)
+        val (indices, data) = b.unzip
+        val psv = new PSV(bsm.cols, indices.toArray, new DoubleArray(data.toArray))
+        rowData.setData(psv)
         rowData
       }
     }

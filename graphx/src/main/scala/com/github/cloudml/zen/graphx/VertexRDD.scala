@@ -66,6 +66,8 @@ abstract class VertexRDD[VD: ClassTag](
     this
   }
 
+  override def getStorageLevel: StorageLevel = partitionsRDD.getStorageLevel
+
   override def unpersist(blocking: Boolean = true): this.type = {
     partitionsRDD.unpersist(blocking)
     this

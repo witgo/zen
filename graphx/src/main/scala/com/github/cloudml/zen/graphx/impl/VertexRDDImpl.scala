@@ -38,8 +38,7 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
   override val psName: String,
   override val isDense: Boolean,
   override val rowSize: Long,
-  override val colSize: Long,
-  val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK)
+  override val colSize: Long)
   extends VertexRDD[VD](partitionsRDD.context, List(new OneToOneDependency(partitionsRDD))) {
   @transient protected lazy val vdTag: ClassTag[VD] = implicitly[ClassTag[VD]]
   private[graphx] var batchSize: Int = 1000
