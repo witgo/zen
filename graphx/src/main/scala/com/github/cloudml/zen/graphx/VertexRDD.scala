@@ -19,7 +19,7 @@ package com.github.cloudml.zen.graphx
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.{TaskContext, Dependency, Partition, SparkContext}
+import org.apache.spark.{Dependency, Partition, SparkContext, TaskContext}
 import org.parameterserver.client.PSClient
 
 import scala.reflect.ClassTag

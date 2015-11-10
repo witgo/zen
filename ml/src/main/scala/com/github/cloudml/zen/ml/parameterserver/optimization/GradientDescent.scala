@@ -17,27 +17,24 @@
 
 package com.github.cloudml.zen.ml.parameterserver.optimization
 
-import scala.collection.mutable.ArrayBuffer
-
-import org.apache.spark.annotation.{Experimental, DeveloperApi}
 import org.apache.spark.Logging
+import org.apache.spark.annotation.{DeveloperApi, Experimental}
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV, Vectors}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.mllib.linalg.{Vectors, Vector => SV, DenseVector => SDV, SparseVector => SSV}
+import org.parameterserver.client.PSClient
+import org.parameterserver.protocol.{DataType, DoubleArray}
+import org.parameterserver.{Configuration => PSConf}
 
-import org.parameterserver.client.{VectorReader, PSClient}
-import org.parameterserver.collect.{IntHashSet, Int2DoubleMap}
-import org.parameterserver.protocol.{DoubleArray, DataType}
-
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 /**
- * Class used to solve an optimization problem using Gradient Descent.
- * @param gradient Gradient function to be used.
- * @param updater Updater to be used to update weights after every iteration.
- */
+  * Class used to solve an optimization problem using Gradient Descent.
+  * @param gradient Gradient function to be used.
+  * @param updater Updater to be used to update weights after every iteration.
+  */
 @Experimental
-class GradientDescent(private var gradient: Gradient, private var updater: Updater,
-  private var masterSockAddr: String) extends Optimizer with Logging {
+class GradientDescent(private var gradient: Gradient, private var updater: Updater) extends Optimizer with Logging {
 
   private var stepSize: Double = 1.0
   private var numIterations: Int = 100
@@ -45,19 +42,19 @@ class GradientDescent(private var gradient: Gradient, private var updater: Updat
   private var batchSize: Int = 1
 
   /**
-   * Set the initial step size of SGD for the first step. Default 1.0.
-   * In subsequent steps, the step size will decrease with stepSize/sqrt(t)
-   */
+    * Set the initial step size of SGD for the first step. Default 1.0.
+    * In subsequent steps, the step size will decrease with stepSize/sqrt(t)
+    */
   def setStepSize(step: Double): this.type = {
     this.stepSize = step
     this
   }
 
   /**
-   * :: Experimental ::
-   * Set the mini-batch size for SGD. default value 1.0
-   * Default 1.0 (corresponding to deterministic/classical gradient descent)
-   */
+    * :: Experimental ::
+    * Set the mini-batch size for SGD. default value 1.0
+    * Default 1.0 (corresponding to deterministic/classical gradient descent)
+    */
   @Experimental
   def setMiniBatch(batchSize: Int): this.type = {
     this.batchSize = batchSize
@@ -65,64 +62,53 @@ class GradientDescent(private var gradient: Gradient, private var updater: Updat
   }
 
   /**
-   * Set the number of iterations for SGD. Default 100.
-   */
+    * Set the number of iterations for SGD. Default 100.
+    */
   def setNumIterations(iters: Int): this.type = {
     this.numIterations = iters
     this
   }
 
   /**
-   * Set the regularization parameter. Default 0.0.
-   */
+    * Set the regularization parameter. Default 0.0.
+    */
   def setRegParam(regParam: Double): this.type = {
     this.regParam = regParam
     this
   }
 
   /**
-   * Set the gradient function (of the loss function of one single data example)
-   * to be used for SGD.
-   */
+    * Set the gradient function (of the loss function of one single data example)
+    * to be used for SGD.
+    */
   def setGradient(gradient: Gradient): this.type = {
     this.gradient = gradient
     this
   }
 
   /**
-   * Set the updater function to actually perform a gradient step in a given direction.
-   * The updater is responsible to perform the update from the regularization term as well,
-   * and therefore determines what kind or regularization is used, if any.
-   */
+    * Set the updater function to actually perform a gradient step in a given direction.
+    * The updater is responsible to perform the update from the regularization term as well,
+    * and therefore determines what kind or regularization is used, if any.
+    */
   def setUpdater(updater: Updater): this.type = {
     this.updater = updater
     this
   }
 
   /**
-   * Set the IP Socket Address for parameter server.
-   * @param addr
-   * @return
-   */
-  def setMasterSockAddr(addr: String): this.type = {
-    this.masterSockAddr = addr
-    this
-  }
-
-  /**
-   * :: DeveloperApi ::
-   * Runs gradient descent on the given training data.
-   * @param data training data
-   * @param initialWeights initial weights
-   * @return solution vector
-   */
+    * :: DeveloperApi ::
+    * Runs gradient descent on the given training data.
+    * @param data training data
+    * @param initialWeights initial weights
+    * @return solution vector
+    */
   @DeveloperApi
   def optimize(data: RDD[(SV, SV)], initialWeights: SV): SV = {
     val (weights, _) = GradientDescent.runMiniBatchSGD(
       data,
       gradient,
       updater,
-      masterSockAddr,
       stepSize,
       numIterations,
       regParam,
@@ -134,37 +120,36 @@ class GradientDescent(private var gradient: Gradient, private var updater: Updat
 }
 
 /**
- * :: DeveloperApi ::
- * Top-level method to run gradient descent.
- */
+  * :: DeveloperApi ::
+  * Top-level method to run gradient descent.
+  */
 @DeveloperApi
 object GradientDescent extends Logging {
   /**
-   * Run stochastic gradient descent (SGD) in parallel using mini batches.
-   * In each iteration, we sample a subset (fraction miniBatchFraction) of the total data
-   * in order to compute a gradient estimate.
-   * Sampling, and averaging the subgradients over this subset is performed using one standard
-   * spark map-reduce in each iteration.
-   *
-   * @param data - Input data for SGD. RDD of the set of data examples, each of
-   *             the form (label, [feature values]).
-   * @param gradient - Gradient object (used to compute the gradient of the loss function of
-   *                 one single data example)
-   * @param updater - Updater function to actually perform a gradient step in a given direction.
-   * @param stepSize - initial step size for the first step
-   * @param numIterations - number of iterations that SGD should be run.
-   * @param regParam - regularization parameter
-   * @param batchSize -  mini-batch size default value 1.0.
-   *
-   * @return A tuple containing two elements. The first element is a column matrix containing
-   *         weights for every feature, and the second element is an array containing the
-   *         stochastic loss computed for every iteration.
-   */
+    * Run stochastic gradient descent (SGD) in parallel using mini batches.
+    * In each iteration, we sample a subset (fraction miniBatchFraction) of the total data
+    * in order to compute a gradient estimate.
+    * Sampling, and averaging the subgradients over this subset is performed using one standard
+    * spark map-reduce in each iteration.
+    *
+    * @param data - Input data for SGD. RDD of the set of data examples, each of
+    *             the form (label, [feature values]).
+    * @param gradient - Gradient object (used to compute the gradient of the loss function of
+    *                 one single data example)
+    * @param updater - Updater function to actually perform a gradient step in a given direction.
+    * @param stepSize - initial step size for the first step
+    * @param numIterations - number of iterations that SGD should be run.
+    * @param regParam - regularization parameter
+    * @param batchSize -  mini-batch size default value 1.0.
+    *
+    * @return A tuple containing two elements. The first element is a column matrix containing
+    *         weights for every feature, and the second element is an array containing the
+    *         stochastic loss computed for every iteration.
+    */
   def runMiniBatchSGD(
     data: RDD[(SV, SV)],
     gradient: Gradient,
     updater: Updater,
-    masterSockAddr: String,
     stepSize: Double,
     numIterations: Int,
     regParam: Double,
@@ -185,7 +170,7 @@ object GradientDescent extends Logging {
     val randStr = Random.nextLong().toString
 
     val psNamespace = s"n-$randStr"
-    val psClient = new PSClient(masterSockAddr)
+    val psClient = new PSClient(new PSConf(true))
     psClient.setContext(psNamespace)
 
     // weights vector name
@@ -198,7 +183,6 @@ object GradientDescent extends Logging {
       // psClient.setEpoch(i)
       // .sortBy(t => Random.nextLong())
       val (countSum, lossSum) = data.mapPartitions { iter =>
-        val psClient = new PSClient(masterSockAddr)
         psClient.setContext(psNamespace)
         var sdvIndices: Array[Int] = null
         var innerIter = 1

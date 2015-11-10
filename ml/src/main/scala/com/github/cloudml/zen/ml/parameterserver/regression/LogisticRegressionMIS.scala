@@ -16,19 +16,19 @@
  */
 package com.github.cloudml.zen.ml.parameterserver.regression
 
-import com.github.cloudml.zen.ml.util.SparkUtils._
-import com.github.cloudml.zen.ml.util.Utils
 import com.github.cloudml.zen.graphx._
 import com.github.cloudml.zen.graphx.impl.GraphImpl
+import com.github.cloudml.zen.ml.parameterserver.regression.LogisticRegression._
+import com.github.cloudml.zen.ml.util.SparkUtils._
+import com.github.cloudml.zen.ml.util.Utils
+import org.apache.spark.Logging
 import org.apache.spark.mllib.classification.LogisticRegressionModel
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV, Vectors}
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, Vector => SV}
 import org.apache.spark.mllib.regression.{GeneralizedLinearModel, LabeledPoint}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.{HashPartitioner, Logging}
 
 import scala.math._
-import LogisticRegression._
 
 abstract class LogisticRegression(
   @transient val dataSet: Graph[VD, ED],
@@ -205,12 +205,11 @@ class LogisticRegressionMIS(
   useAdaGrad_, storageLevel_) {
   def this(
     input: RDD[(VertexId, LabeledPoint)],
-    psMaster: String,
     stepSize: Double = 1e-4,
     regParam: Double = 0.0,
     useAdaGrad: Boolean = false,
     storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK) {
-    this(initializeDataSet(psMaster, input, storageLevel), stepSize, regParam, useAdaGrad, storageLevel)
+    this(initializeDataSet(input, storageLevel), stepSize, regParam, useAdaGrad, storageLevel)
   }
 
   @transient private var qWithLabel: VertexRDD[VD] = null
@@ -381,13 +380,12 @@ object LogisticRegression {
       features.activeValuesIterator.foreach(t => assert(t >= 0.0, s"feature $t less than 0"))
       (id, LabeledPoint(newLabel, features))
     }
-    val lr = new LogisticRegressionMIS(data, psMaster, stepSize, regParam, useAdaGrad, storageLevel)
+    val lr = new LogisticRegressionMIS(data, stepSize, regParam, useAdaGrad, storageLevel)
     lr.setEpsilon(epsilon).run(numIterations)
     lr.saveModel()
   }
 
   private[ml] def initializeDataSet(
-    psMater: String,
     input: RDD[(VertexId, LabeledPoint)],
     storageLevel: StorageLevel): Graph[VD, ED] = {
     val edges = input.flatMap { case (sampleId, labelPoint) =>
@@ -404,7 +402,7 @@ object LogisticRegression {
       val parms = Utils.random.nextGaussian() * 1e-2
       (featureId2VertexId(featureId), parms)
     }).persist(storageLevel)
-    val newDataSet = GraphImpl.fromExistingRDDs(psMater, vertices, edges)
+    val newDataSet = GraphImpl.fromExistingRDDs(vertices, edges)
     newDataSet.persist(storageLevel)
     newDataSet.vertices.count()
     newDataSet.edges.count()
