@@ -19,7 +19,8 @@ package com.github.cloudml.zen.graphx.impl
 
 import java.util.UUID
 
-import com.github.cloudml.zen.graphx.util.{CompletionIterator, PSUtils => GPSUtils}
+import com.github.cloudml.zen.graphx.util.CompletionIterator
+import com.github.cloudml.zen.graphx.ps.{Operation => PSop}
 import com.github.cloudml.zen.graphx.{VertexId, VertexRDD}
 import org.apache.spark._
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
@@ -52,7 +53,7 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
   override def compute(part: Partition, context: TaskContext): Iterator[(VertexId, VD)] = {
     val client = psClient
     val newIter = firstParent[VertexId].iterator(part, context).grouped(batchSize).map { ids =>
-      val values = GPSUtils.get[VD](psClient, psName, ids.map(_.toInt).toArray)
+      val values = PSop.get[VD](psClient, psName, ids.map(_.toInt).toArray)
       ids.zip(values).toIterator
     }.flatten
     CompletionIterator[(VertexId, VD), Iterator[(VertexId, VD)]](newIter, client.close())
@@ -63,7 +64,7 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
       val client = psClient
       iter.grouped(batchSize).foreach { p =>
         val (indices, values) = p.unzip
-        GPSUtils.batchUpadte(client, psName, indices.map(_.toInt).toArray, values.toArray)
+        PSop.update(client, psName, indices.map(_.toInt).toArray, values.toArray)
       }
       client.close()
     }
@@ -87,7 +88,7 @@ class VertexRDDImpl[VD: ClassTag] private[graphx](
 
   override def destroy(blocking: Boolean): Unit = {
     val client = psClient
-    GPSUtils.remove[VD](client, psName)
+    PSop.remove[VD](client, psName)
     client.close()
   }
 }

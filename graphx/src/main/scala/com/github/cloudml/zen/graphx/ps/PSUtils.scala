@@ -15,25 +15,15 @@
  * limitations under the License.
  */
 
-package com.github.cloudml.zen.graphx.impl
-
-import scala.language.implicitConversions
-
-import com.github.cloudml.zen.graphx._
-import com.github.cloudml.zen.graphx.ps._
-import com.github.cloudml.zen.graphx.ps.Operation._
+package com.github.cloudml.zen.graphx.ps
 
 import org.parameterserver.client.PSClient
-import scala.reflect.ClassTag
+import org.parameterserver.{Configuration => PSConf}
 
-class VertexCollectorImpl[VD: ClassTag, ED: ClassTag](
-  val psClient: PSClient,
-  val psName: String) extends VertexCollector[VD, ED] {
-  override def update(vid: VertexId, msg: VD): Unit = {
-    Operation.update[VD](psClient, psName, Array(vid.toInt), Array(msg))
+private[graphx] object PSUtils {
+
+  def createPSClient(conf: PSConf = null): PSClient = {
+    new PSClient(if (conf == null) new PSConf(true) else conf)
   }
 
-  override def inc(vid: VertexId, msg: VD): Unit = {
-    Operation.inc[VD](psClient, psName, Array(vid.toInt), Array(msg))
-  }
 }
