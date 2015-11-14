@@ -18,9 +18,11 @@
 package com.github.cloudml.zen.graphx.impl
 
 import com.github.cloudml.zen.graphx._
-import com.github.cloudml.zen.graphx.util.{CompletionIterator, PSUtils => GPSUtils}
+import com.github.cloudml.zen.graphx.util.CompletionIterator
+import com.github.cloudml.zen.graphx.ps.{Operation => PSop, PSUtils => GPSUtils}
 import org.apache.spark.TaskContext
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
+import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.parameterserver.client.PSClient
@@ -181,7 +183,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
     val isDense = vi.isDense
     val rowSize = vi.rowSize
     val colSize = vi.colSize
-    val vName = GPSUtils.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
+    val vName = PSop.create[VD](psClient, isDense, rowSize.toInt, colSize.toInt)
     val newVertices = new VertexRDDImpl[VD](v.map(_._1), vName, isDense, rowSize, colSize)
     newVertices.updateValues(v)
     new GraphImpl[VD, ED](newVertices, newEdges)
@@ -203,7 +205,7 @@ class GraphImpl[VD: ClassTag, ED: ClassTag](
           indices.zipWithIndex.foreach { case (vid, offset) =>
             v2i(vid) = offset
           }
-          val vd = GPSUtils.get[VD](psClient, vName, indices.map(_.toInt))
+          val vd = PSop.get[VD](psClient, vName, indices.map(_.toInt))
           batchEdges.map { edge =>
             var srcAttr: VD = null.asInstanceOf[VD]
             var dstAttr: VD = null.asInstanceOf[VD]
@@ -276,16 +278,19 @@ object GraphImpl {
     var isDense: Boolean = false
     val rowNum: Long = if (rowSize > 0) rowSize else ids.max() + 1
     var colNum: Long = if (colSize > 0) colSize else Int.MaxValue
-    val psName = if (classOf[SV].isAssignableFrom(vdClass)) {
+
+    if (classOf[SV].isAssignableFrom(vdClass)) {
+      isDense = !(vertices.filter(_._2.isInstanceOf[SSV]).count() < 1)
+      isDense = isDense && !(vertices.map(_._2.asInstanceOf[SV].size).distinct().count() == 1)
       if (colSize < 0) colNum = vertices.map(_._2.asInstanceOf[SV].size).max()
-      isDense = !(vertices.map(_._2.asInstanceOf[SSV]).filter(_ != null).count() > 1 ||
-        vertices.map(_._2.asInstanceOf[SV].size).distinct().count() == 1)
-      GPSUtils.create[VD](psClient, isDense, rowNum.toInt, colNum.toInt)
-    } else if (vdClass == java.lang.Integer.TYPE || vdClass == java.lang.Double.TYPE) {
-      GPSUtils.create[VD](psClient, isDense, rowNum.toInt, colNum.toInt)
-    } else {
-      throw new IllegalArgumentException(s"Unsupported type: $vdClass")
+
+    } else if (classOf[BV[_]].isAssignableFrom(vdClass)) {
+      isDense = !(vertices.filter(_._2.isInstanceOf[BSV[_]]).count() < 1)
+      isDense = isDense && !(vertices.map(_._2.asInstanceOf[BV[_]].length).distinct().count() == 1)
+      if (colSize < 0) colNum = vertices.map(_._2.asInstanceOf[BV[_]].size).max()
     }
+
+    val psName = PSop.create[VD](psClient, isDense, rowNum.toInt, colNum.toInt)
     val vertexRDD = new VertexRDDImpl[VD](ids, psName, isDense, rowNum, colNum)
     vertexRDD.updateValues(vertices)
     psClient.close()
