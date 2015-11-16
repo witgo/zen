@@ -21,7 +21,7 @@ package com.github.cloudml.zen.graphx.util
  * Wrapper around an iterator which calls a completion method after it successfully iterates
  * through all the elements.
  */
-private[graphx]
+private[zen]
 // scalastyle:off
 abstract class CompletionIterator[+A, +I <: Iterator[A]](sub: I) extends Iterator[A] {
   // scalastyle:on
@@ -42,7 +42,7 @@ abstract class CompletionIterator[+A, +I <: Iterator[A]](sub: I) extends Iterato
   def completion(): Unit
 }
 
-private[graphx] object CompletionIterator {
+private[zen] object CompletionIterator {
   def apply[A, I <: Iterator[A]](sub: I, completionFunction: => Unit): CompletionIterator[A, I] = {
     new CompletionIterator[A, I](sub) {
       def completion(): Unit = completionFunction
