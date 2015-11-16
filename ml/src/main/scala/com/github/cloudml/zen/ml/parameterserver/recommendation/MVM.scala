@@ -139,7 +139,7 @@ private[ml] abstract class MVM(
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val pSize = data.partitions.length
       val startedAt = System.nanoTime()
-      // val gammaDist = samplingGammaDist()
+      val gammaDist = samplingGammaDist()
       val thisStepSize = stepSize
       // val lossSum = data.sortBy(t => Utils.random.nextLong()).mapPartitionsWithIndex { case (pid, iter) =>
       val costSum = data.mapPartitionsWithIndex { case (pid, iter) =>
@@ -175,7 +175,7 @@ private[ml] abstract class MVM(
           }
 
           innerIter += 1
-          updateWeight(grad, featureIds, psClient, rand, thisStepSize, innerIter)
+          updateWeight(grad, featureIds, gammaDist, psClient, rand, thisStepSize, innerIter)
           costSum
         }
         CompletionIterator[Double, Iterator[Double]](newIter, psClient.close())
@@ -262,7 +262,7 @@ private[ml] abstract class MVM(
     grad.zip(featuresIds).foreach { case (g, vid) =>
       val viewId = featureId2viewId(vid, views)
       rankIndices.foreach { i =>
-        g(i) = -(tss * g(i) + rand.nextGaussian() * math.sqrt(gammaDist(i + viewId * rank)) * 1)
+        g(i) = -(tss * g(i) + rand.nextGaussian() * math.sqrt(gammaDist(i + viewId * rank)) * epsilon)
       }
     }
     psClient.add2Matrix(weightName, array2RowData(grad, featuresIds))
