@@ -65,8 +65,8 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val stepSize = 0.1
     val numIterations = 10000
-    val regParam = 0.0
-    val rank = 8
+    val regParam = 0.065
+    val rank = 4
     val useAdaGrad = false
     val miniBatch = 100
 

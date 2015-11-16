@@ -20,6 +20,7 @@ package com.github.cloudml.zen.ml.parameterserver.recommendation
 import java.util.UUID
 
 import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
+import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import com.github.cloudml.zen.graphx.util.CompletionIterator
 import com.github.cloudml.zen.ml.recommendation.MVMModel
 import com.github.cloudml.zen.ml.util.{SparkUtils, Utils}
@@ -55,13 +56,14 @@ private[ml] abstract class MVM(
 
   val numSamples: Long = data.count()
   val numFeature = data.first().features.size
-
+  protected val viewFeaturesIds = views.indices.map(i => numFeature + i)
+  protected val viewSize = views.length
   @transient lazy val featureIds: RDD[Int] = {
     (data.sparkContext.parallelize(views.indices.map(i => numFeature + i)) ++
       data.map(_.features.toSparse).flatMap(_.indices)).distinct.persist(storageLevel)
   }
 
-  val weightName = {
+  protected val weightName = {
     val psClient = new PSClient(new PSConf(true))
     val maxId = featureIds.max()
     val wName = UUID.randomUUID().toString
@@ -86,7 +88,7 @@ private[ml] abstract class MVM(
     psClient.close()
     wName
   }
-  val gardSumName: String = {
+  protected val gardSumName: String = {
     val psClient = new PSClient(new PSConf(true))
     val maxId = featureIds.max()
     val gName = UUID.randomUUID().toString
@@ -140,17 +142,15 @@ private[ml] abstract class MVM(
       // val gammaDist = samplingGammaDist()
       val thisStepSize = stepSize
       // val lossSum = data.sortBy(t => Utils.random.nextLong()).mapPartitionsWithIndex { case (pid, iter) =>
-      val lossSum = data.mapPartitionsWithIndex { case (pid, iter) =>
+      val costSum = data.mapPartitionsWithIndex { case (pid, iter) =>
         val psClient = new PSClient(new PSConf(true))
         val reader = new MatrixReader(psClient, weightName)
         val rand = new Well19937c(innerEpoch * pSize + pid)
         val rankIndices = 0 until rank
         var innerIter = 0
-        val viewSize = views.length
 
-        val viewFeaturesIds = views.indices.map(i => numFeature + i)
         val newIter = iter.grouped(batchSize).map { samples =>
-          var lossSum = 0D
+          var costSum = 0D
           val sampleSize = samples.length
           val featureIds = (samples.map(_.features.toSparse).flatMap(_.indices).distinct ++
             viewFeaturesIds).sortBy(t => t).toArray
@@ -160,48 +160,12 @@ private[ml] abstract class MVM(
           samples.foreach { sample =>
             val arr = new Array[Double](rank * viewSize)
             val label = sample.label
-            val bv = SparkUtils.toBreeze(sample.features)
-
-            bv.activeIterator.foreach { case (featureId, value) =>
-              val viewId = featureId2viewId(featureId, views)
-              forward(rank, viewId, arr, value, features(f2i(featureId)))
-            }
-            viewFeaturesIds.foreach { featureId =>
-              val viewId = featureId2viewId(featureId, views)
-              val value = 1D
-              forward(rank, viewId, arr, value, features(f2i(featureId)))
-            }
-
+            forwardSample(sample.features, f2i, features, arr)
             val multi = multiplier(arr, label)
-            lossSum += loss(multi, label)
-
-            bv.activeIterator.foreach { case (featureId, value) =>
-              val viewId = featureId2viewId(featureId, views)
-              val b = backward(rank, viewId, value, multi, multi.last)
-              rankIndices.foreach { i =>
-                b(i) += regParam * features(f2i(featureId))(i)
-              }
-              if (grad(f2i(featureId)) == null) {
-                grad(f2i(featureId)) = b
-              } else {
-                reduceInterval(grad(f2i(featureId)), b)
-              }
-            }
-            viewFeaturesIds.foreach { featureId =>
-              val viewId = featureId2viewId(featureId, views)
-              val value = 1D
-              val b = backward(rank, viewId, value, multi, multi.last)
-              rankIndices.foreach { i =>
-                b(i) += regParam * features(f2i(featureId))(i)
-              }
-              if (grad(f2i(featureId)) == null) {
-                grad(f2i(featureId)) = b
-              } else {
-                reduceInterval(grad(f2i(featureId)), b)
-              }
-            }
-
+            costSum += loss(multi, label)
+            backwardSample(sample.features, multi, f2i, features, grad)
           }
+
           reader.clear()
 
           grad.foreach { g =>
@@ -212,14 +176,73 @@ private[ml] abstract class MVM(
 
           innerIter += 1
           updateWeight(grad, featureIds, psClient, rand, thisStepSize, innerIter)
-          lossSum
+          costSum
         }
         CompletionIterator[Double, Iterator[Double]](newIter, psClient.close())
-      }.sum / numSamples
+      }.sum
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $epoch/$iterations) loss:                     ${math.sqrt(lossSum)}")
+      println(s"(Iteration $epoch/$iterations) loss:                     ${lossSum(costSum, numSamples)}")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
+    }
+  }
+
+  private def backwardSample(
+    sample: SV,
+    multi: Array[Double],
+    fId2Offset: Map[Int, Int],
+    features: Array[Array[Double]],
+    grad: Array[Array[Double]]): Unit = {
+    val ssv = sample.toSparse
+    var i = 0
+    while (i < ssv.indices.length) {
+      val featureId = ssv.indices(i)
+      val value = ssv.values(i)
+      val viewId = featureId2viewId(featureId, views)
+      val b = backward(rank, viewId, value, multi, multi.last)
+      for (rankId <- 0 until rank) {
+        b(i) += regParam * features(fId2Offset(featureId))(rankId)
+      }
+      if (grad(fId2Offset(featureId)) == null) {
+        grad(fId2Offset(featureId)) = b
+      } else {
+        reduceInterval(grad(fId2Offset(featureId)), b)
+      }
+      i += 1
+    }
+
+    viewFeaturesIds.foreach { featureId =>
+      val viewId = featureId2viewId(featureId, views)
+      val value = 1D
+      val b = backward(rank, viewId, value, multi, multi.last)
+      for (rankId <- 0 until rank) {
+        b(i) += regParam * features(fId2Offset(featureId))(rankId)
+      }
+      if (grad(fId2Offset(featureId)) == null) {
+        grad(fId2Offset(featureId)) = b
+      } else {
+        reduceInterval(grad(fId2Offset(featureId)), b)
+      }
+    }
+  }
+
+
+  private def forwardSample(
+    sample: SV, fId2Offset: Map[Int, Int],
+    features: Array[Array[Double]], arr: Array[Double]): Unit = {
+    val ssv = sample.toSparse
+    var i = 0
+    while (i < ssv.indices.length) {
+      val featureId = ssv.indices(i)
+      val value = ssv.values(i)
+      val viewId = featureId2viewId(featureId, views)
+      forward(rank, viewId, arr, value, features(fId2Offset(featureId)))
+      i += 1
+    }
+    viewFeaturesIds.foreach { featureId =>
+      val viewId = featureId2viewId(featureId, views)
+      val value = 1D
+      forward(rank, viewId, arr, value, features(fId2Offset(featureId)))
     }
   }
 
@@ -346,6 +369,8 @@ private[ml] abstract class MVM(
 
   def loss(arr: Array[Double], label: Double): Double
 
+  def lossSum(loss: Double, numSamples: Long): Double
+
   def backward(rank: Int, viewId: Int, x: ED, arr: Array[Double], multi: Double): Array[Double] = {
     backwardInterval(rank, viewId, x, arr, multi)
   }
@@ -367,6 +392,10 @@ class MVMRegression(
   override def predict(arr: Array[Double]): Double = {
     val result = MVM.predictInterval(rank, arr)
     result
+  }
+
+  override def lossSum(loss: Double, numSamples: Long): Double = {
+    math.sqrt(loss / numSamples)
   }
 
   override def loss(arr: Array[Double], label: Double): Double = {
