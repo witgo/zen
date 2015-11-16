@@ -90,24 +90,14 @@ private[ml] abstract class MVM(
   }
   protected val gardSumName: String = {
     val psClient = new PSClient(new PSConf(true))
-    val maxId = featureIds.max()
     val gName = UUID.randomUUID().toString
-    psClient.createMatrix(gName, false, true, maxId + 1, rank, DataType.Double)
-
-    featureIds.map { featureId =>
-      (featureId, new Array[Double](rank))
-    }.foreachPartition { iter =>
-      iter.grouped(batchSize).foreach { seq =>
-        val (ids, values) = seq.unzip
-        psClient.updateMatrix(gName, array2RowData(values.toArray, ids.toArray))
-      }
-      psClient.close()
-    }
+    psClient.createMatrix(gName, weightName)
+    psClient.matrixAxpby(gName, 1D, weightName, 0D)
     psClient.close()
     gName
   }
 
-  def features: RDD[(Int, Array[Double])] = {
+  def features: RDD[(Int, VD)] = {
     featureIds.mapPartitions { iter =>
       val psClient = new PSClient(new PSConf(true))
       val newIter = iter.grouped(batchSize).flatMap { seq =>
@@ -115,27 +105,21 @@ private[ml] abstract class MVM(
         val rows = psClient.getMatrix(weightName, ids.map(r => new Row(r)))
         ids.zip(rowData2Array(rows))
       }
-      CompletionIterator[(Int, Array[Double]), Iterator[(Int, Array[Double])]](newIter, psClient.close())
+      CompletionIterator[(Int, VD), Iterator[(Int, VD)]](newIter, psClient.close())
     }
   }
 
-  def cleanGardSum(): Unit = {
-    val featureIds = data.map(_.features.toSparse).flatMap(_.indices).distinct
-    featureIds.map { featureId =>
-      (featureId, new Array[Double](rank))
-    }.foreachPartition { iter =>
+  protected def cleanGardSum(rho: Double): Unit = {
+    if (useAdaGrad) {
       val psClient = new PSClient(new PSConf(true))
-      iter.grouped(batchSize).foreach { seq =>
-        val (ids, values) = seq.unzip
-        psClient.updateMatrix(gardSumName, array2RowData(values.toArray, ids.toArray))
-      }
+      psClient.matrixAxpby(gardSumName, rho, weightName, 0D)
       psClient.close()
     }
   }
 
   def run(iterations: Int): Unit = {
     for (epoch <- 1 to iterations) {
-      // if (innerEpoch % 10 == 9) cleanGardSum()
+      // cleanGardSum(0.98)
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val pSize = data.partitions.length
       val startedAt = System.nanoTime()
@@ -156,7 +140,7 @@ private[ml] abstract class MVM(
             viewFeaturesIds).sortBy(t => t).toArray
           val features = rowData2Array(reader.read(featureIds))
           val f2i = featureIds.zipWithIndex.toMap
-          val grad = new Array[Array[Double]](featureIds.length)
+          val grad = new Array[VD](featureIds.length)
           samples.foreach { sample =>
             val arr = new Array[Double](rank * viewSize)
             val label = sample.label
@@ -167,7 +151,6 @@ private[ml] abstract class MVM(
           }
 
           reader.clear()
-
           grad.foreach { g =>
             rankIndices.foreach { i =>
               g(i) = g(i) / sampleSize
@@ -175,7 +158,7 @@ private[ml] abstract class MVM(
           }
 
           innerIter += 1
-          updateWeight(grad, featureIds, gammaDist, psClient, rand, thisStepSize, innerIter)
+          updateWeight(grad, features, featureIds, gammaDist, psClient, rand, thisStepSize, innerIter)
           costSum
         }
         CompletionIterator[Double, Iterator[Double]](newIter, psClient.close())
@@ -191,8 +174,8 @@ private[ml] abstract class MVM(
     sample: SV,
     multi: Array[Double],
     fId2Offset: Map[Int, Int],
-    features: Array[Array[Double]],
-    grad: Array[Array[Double]]): Unit = {
+    features: Array[VD],
+    grad: Array[VD]): Unit = {
     val ssv = sample.toSparse
     var i = 0
     while (i < ssv.indices.length) {
@@ -226,10 +209,9 @@ private[ml] abstract class MVM(
     }
   }
 
-
   private def forwardSample(
     sample: SV, fId2Offset: Map[Int, Int],
-    features: Array[Array[Double]], arr: Array[Double]): Unit = {
+    features: Array[VD], arr: Array[Double]): Unit = {
     val ssv = sample.toSparse
     var i = 0
     while (i < ssv.indices.length) {
@@ -247,7 +229,8 @@ private[ml] abstract class MVM(
   }
 
   def updateWeight(
-    grad: Array[Array[Double]],
+    grad: Array[VD],
+    features: Array[VD],
     featuresIds: Array[Int],
     gammaDist: Array[Double],
     psClient: PSClient,
@@ -256,41 +239,28 @@ private[ml] abstract class MVM(
     iter: Int): Unit = {
     if (useAdaGrad) adaGrad(grad, featuresIds, psClient)
     val rankIndices = 0 until rank
-    val gamma = 0.501
-    val tss = if (useAdaGrad) stepSize else stepSize / math.pow(iter + 17D, gamma)
-    val epsilon = 1.0 / math.pow(iter + 17D, gamma)
-    grad.zip(featuresIds).foreach { case (g, vid) =>
+    val a = 0.7 // (0.5, 1]
+    val b = 48D
+    val epsilon = stepSize * math.pow(iter + b, -a)
+    val tss = if (useAdaGrad) stepSize else stepSize * math.pow(iter + b, -a)
+    featuresIds.indices.foreach { i =>
+      val g = grad(i)
+      // val w = features(i)
+      val vid = featuresIds(i)
       val viewId = featureId2viewId(vid, views)
-      rankIndices.foreach { i =>
-        g(i) = -(tss * g(i) + rand.nextGaussian() * math.sqrt(gammaDist(i + viewId * rank)) * epsilon)
+
+      rankIndices.foreach { rankId =>
+        val gamma = gammaDist(rankId + viewId * rank)
+        val theta = rand.nextGaussian() * math.sqrt(gamma) * epsilon
+        val nu = rand.nextGaussian() * math.sqrt(2D * epsilon / numSamples)
+        g(rankId) = -tss * g(rankId) + theta + nu
       }
     }
     psClient.add2Matrix(weightName, array2RowData(grad, featuresIds))
   }
-
-  def updateWeight(
-    grad: Array[Array[Double]],
-    featuresIds: Array[Int],
-    psClient: PSClient,
-    rand: RandomGenerator,
-    stepSize: Double,
-    iter: Int): Unit = {
-    if (useAdaGrad) adaGrad(grad, featuresIds, psClient)
-    val rankIndices = 0 until rank
-    val gamma = 0.501
-    val tss = if (useAdaGrad) stepSize else stepSize / math.pow(iter + 17D, gamma) / 2D
-    val epsilon = stepSize / math.pow(iter + 17D, gamma) / numSamples
-    grad.foreach { g =>
-      rankIndices.foreach { i =>
-        g(i) = -(tss * g(i) + epsilon * rand.nextGaussian() * math.sqrt(epsilon))
-      }
-    }
-    psClient.add2Matrix(weightName, array2RowData(grad, featuresIds))
-  }
-
 
   def adaGrad(
-    grad: Array[Array[Double]],
+    grad: Array[VD],
     featuresIds: Array[Int],
     psClient: PSClient): Unit = {
     val rankIndices = 0 until rank
@@ -341,16 +311,16 @@ private[ml] abstract class MVM(
       arr
     }, reduceInterval)
     val gamma = new Array[Double](rank * viewSize)
-    val alpha = 1.0
-    val beta = 1.0
+    val alpha = 1D
+    val beta = 1D
     val rand = new Well19937c(Utils.random.nextLong())
     for (viewId <- 0 until viewSize) {
       for (rankId <- rankIndices) {
         val offset = rankId + viewId * rank
-        val shape = (alpha + dist(offset)) / 2.0
-        val scale = (beta + dist(offset + viewSize * rank)) / 2.0
+        val shape = (alpha + dist(offset)) / 2D
+        val scale = (beta + dist(offset + viewSize * rank)) / 2D
         val rng = new GammaDistribution(rand, shape, scale)
-        gamma(offset) = 1.0 / rng.sample()
+        gamma(offset) = 1D / rng.sample()
       }
     }
     features.unpersist(blocking = false)
@@ -361,7 +331,7 @@ private[ml] abstract class MVM(
 
   def predict(arr: Array[Double]): Double
 
-  def forward(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: Array[Double]): Array[Double] = {
+  def forward(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): Array[Double] = {
     forwardInterval(rank, viewId, arr, z, w)
   }
 
@@ -415,7 +385,7 @@ class MVMRegression(
 
 object MVM {
   private[ml] type ED = Double
-  private[ml] type VD = BDV[Double]
+  private[ml] type VD = Array[Double]
 
   def trainRegression(
     input: RDD[LabeledPoint],
@@ -434,7 +404,7 @@ object MVM {
     rows.map(_.getData.getValues.asInstanceOf[DoubleArray].getValues)
   }
 
-  private[ml] def array2RowData(values: Array[Array[Double]], features: Array[Int]): Array[RowData] = {
+  private[ml] def array2RowData(values: Array[VD], features: Array[Int]): Array[RowData] = {
     val pdv = values.map(v => new PDV(new DoubleArray(v)))
     features.indices.map { i =>
       val rd = new RowData(features(i))
@@ -498,8 +468,7 @@ object MVM {
     * when f belongs to [viewId * rank ,(viewId +1) * rank)
     * arr[f] = z_{i_v}^{(1)}a_{i_{i},j}^{(1)}
     */
-  private[ml] def forwardInterval(rank: Int, viewId: Int, arr: Array[Double],
-    z: ED, w: Array[Double]): Array[Double] = {
+  private[ml] def forwardInterval(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): Array[Double] = {
     var i = 0
     while (i < rank) {
       arr(i + viewId * rank) += z * w(i)
