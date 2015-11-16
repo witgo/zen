@@ -30,13 +30,13 @@ import org.scalatest.{FunSuite, Matchers}
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
   test("movieLens 100k (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
-    val dataSetFile = s"$sparkHome/data/ml-100k/u.data"
+    val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
     sc.setCheckpointDir(checkpointDir)
 
     val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
       iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
-        val Array(userId, movieId, rating, timestamp) = line.split("\t")
+        val Array(userId, movieId, rating, timestamp) = line.split("::")
         val gen = (1125899906842597L * timestamp.toLong).abs
         (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24), gen)
       }
@@ -62,11 +62,15 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     testSet.count()
     movieLens.unpersist()
 
+    // MLUtils.saveAsLibSVMFile(trainSet.repartition(1), s"$sparkHome/data/ml-1m/trainSet/")
+    // MLUtils.saveAsLibSVMFile(testSet.map(_._2).repartition(1), s"$sparkHome/data/ml-1m/testSet/")
+    // sys.exit(-1)
+
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val stepSize = 0.2
     val numIterations = 10000
-    val regParam = 0.1
-    val rank = 4
+    val regParam = 0.01
+    val rank = 16
     val useAdaGrad = false
     val miniBatch = 100
 
