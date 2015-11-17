@@ -109,7 +109,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val regParam = 0.0
     val rank = 16
     val useAdaGrad = false
-    val miniBatch = 10000
+    val miniBatch = 2000
     val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
 
     mvm.run(numIterations)

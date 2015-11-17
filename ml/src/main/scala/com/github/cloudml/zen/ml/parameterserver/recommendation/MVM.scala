@@ -242,9 +242,8 @@ private[ml] abstract class MVM(
     val a = 0.501 // (0.5, 1]
     val b = 48D
     val epsilon = stepSize * math.pow(iter + b, -a)
-    val tss = if (useAdaGrad) stepSize else stepSize * math.pow(iter + b, -a)
-    val newGrad = Array.fill(featuresIds.length)(new Array[Double](rank))
-    new Array[VD](featuresIds.length)
+    val tis = if (useAdaGrad) stepSize else epsilon
+    val newGrad = Array.fill(featuresIds.length)(new VD(rank))
     featuresIds.indices.foreach { i =>
       val g = grad(i)
       // val w = features(i)
@@ -257,7 +256,7 @@ private[ml] abstract class MVM(
         val gamma = gammaDist(rankId + viewId * rank)
         val theta = deg * rand.nextGaussian() * math.sqrt(gamma) * epsilon
         val nu = deg * rand.nextGaussian() * math.sqrt(2D * epsilon / numSamples)
-        ng(rankId) = -tss * g(rankId) + theta + nu
+        ng(rankId) = -tis * g(rankId) + theta + nu
       }
     }
     psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
