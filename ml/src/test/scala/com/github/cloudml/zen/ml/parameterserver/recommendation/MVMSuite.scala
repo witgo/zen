@@ -67,21 +67,21 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.2
+    val stepSize = 0.1
     val numIterations = 10000
-    val regParam = 0.01
+    val regParam = 0.1
     val rank = 16
-    val useAdaGrad = false
+    val useAdaGrad = true
     val miniBatch = 100
 
     val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
-      val thisItr = if (iter < 50) {
-        math.min(25, numIterations - iter)
+      val thisItr = if (iter < 6) {
+        math.min(3, numIterations - iter)
       } else {
-        math.min(10, numIterations - iter)
+        math.min(3, numIterations - iter)
       }
       iter += thisItr
       lfm.run(thisItr)
@@ -90,6 +90,28 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
       val rmse = model.loss(testSet)
       println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
     }
+  }
 
+  ignore("binary classification") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+    val dataSet = MLUtils.loadLibSVMFile(sc, dataSetFile).map {
+      case LabeledPoint(label, features) =>
+        val newLabel = if (label > 0.0) 1.0 else 0.0
+        LabeledPoint(newLabel, features)
+    }.persist()
+    val numFeatures = dataSet.first().features.size
+    val views = Array(numFeatures / 2, numFeatures).map(_.toLong)
+    val stepSize = 1
+    val numIterations = 1000
+    val regParam = 0.0
+    val rank = 16
+    val useAdaGrad = false
+    val miniBatch = 10000
+    val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
+
+    mvm.run(numIterations)
   }
 }
