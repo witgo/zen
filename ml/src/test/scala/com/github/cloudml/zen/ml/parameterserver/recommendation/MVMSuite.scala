@@ -20,7 +20,6 @@ package com.github.cloudml.zen.ml.parameterserver.recommendation
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV, sum => brzSum}
 import com.github.cloudml.zen.ml.recommendation.MVMModel
 import com.github.cloudml.zen.ml.util._
-import com.google.common.io.Files
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.util.MLUtils
@@ -28,7 +27,7 @@ import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
-  test("movieLens 100k (uid,mid) ") {
+  ignore("movieLens 100k (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -69,7 +68,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val stepSize = 0.1
     val numIterations = 10000
-    val regParam = 0.1
+    val regParam = 0.065
     val rank = 16
     val useAdaGrad = true
     val miniBatch = 100
@@ -92,7 +91,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     }
   }
 
-  ignore("binary classification") {
+  test("binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
     val checkpoint = s"$sparkHome/target/tmp"
@@ -100,16 +99,19 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val dataSet = MLUtils.loadLibSVMFile(sc, dataSetFile).map {
       case LabeledPoint(label, features) =>
         val newLabel = if (label > 0.0) 1.0 else 0.0
-        LabeledPoint(newLabel, features)
+        val bsv = SparkUtils.toBreeze(features).asInstanceOf[BSV[Double]]
+        bsv(40) = 0
+        bsv.compact()
+        LabeledPoint(newLabel, SparkUtils.fromBreeze(bsv))
     }.persist()
     val numFeatures = dataSet.first().features.size
-    val views = Array(numFeatures / 2, numFeatures).map(_.toLong)
-    val stepSize = 1
+    val views = Array(40, numFeatures).map(_.toLong)
+    val stepSize = 0.1
     val numIterations = 1000
-    val regParam = 0.0
-    val rank = 16
-    val useAdaGrad = false
-    val miniBatch = 2000
+    val regParam = 0
+    val rank = 4
+    val useAdaGrad = true
+    val miniBatch = 100
     val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
 
     mvm.run(numIterations)

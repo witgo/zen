@@ -153,7 +153,7 @@ private[ml] abstract class MVM(
           }
 
           reader.clear()
-          grad.foreach(g => g.indices.foreach(i => g(i) = g(i) / sampleSize))
+          grad.foreach(g => g.indices.foreach(i => g(i) /= sampleSize))
 
           innerIter += 1
           updateWeight(grad, features, featureIds, gammaDist, psClient, rand, thisStepSize, innerIter)
@@ -268,11 +268,11 @@ private[ml] abstract class MVM(
     psClient: PSClient): Unit = {
     val rankIndices = 0 until rank
     val t2Sum = grad.map { g =>
-      val p = new Array[Double](rank)
+      val t2 = new Array[Double](rank)
       rankIndices.foreach { i =>
-        p(i) = g(i) * g(i)
+        t2(i) = g(i) * g(i)
       }
-      p
+      t2
     }
 
     val rowData = psClient.getMatrix(gardSumName, featuresIds.map(f => new Row(f)))
@@ -285,7 +285,7 @@ private[ml] abstract class MVM(
       val sum = g2Sum(i)
       val t2 = t2Sum(i)
       rankIndices.foreach { offset =>
-        g(offset) /= 1e-6 + math.sqrt(sum(offset) + t2(offset))
+        g(offset) /= (1E-6 + math.sqrt(sum(offset) + t2(offset)))
       }
     }
     psClient.add2Matrix(gardSumName, array2RowData(t2Sum, featuresIds))
@@ -351,10 +351,10 @@ class MVMRegression(
   @transient override val data: RDD[LabeledPoint],
   override val views: Array[Long],
   override val rank: Int,
-  val stepSize: Double,
-  val regParam: Double,
-  val batchSize: Int,
-  val useAdaGrad: Boolean) extends MVM(data, views, rank) {
+  override val stepSize: Double,
+  override val regParam: Double,
+  override val batchSize: Int,
+  override val useAdaGrad: Boolean) extends MVM(data, views, rank) {
 
   val max = data.map(_.label).max
   val min = data.map(_.label).min
@@ -375,13 +375,13 @@ class MVMRegression(
   }
 
   override def multiplier(arr: Array[Double], label: Double): (Array[Double], Double) = {
-    val ret = MVM.sumInterval(rank, arr)
-    var sum = ret.last
+    val multi = MVM.sumInterval(rank, arr)
+    var sum = multi.last
     sum = Math.max(sum, min)
     sum = Math.min(sum, max)
     val diff = sum - label
-    ret(ret.length - 1) = diff * 2.0
-    (ret, diff * diff)
+    multi(multi.length - 1) = diff * 2.0
+    (multi, diff * diff)
   }
 
 }
@@ -390,13 +390,13 @@ class MVMClassification(
   @transient override val data: RDD[LabeledPoint],
   override val views: Array[Long],
   override val rank: Int,
-  val stepSize: Double,
-  val regParam: Double,
-  val batchSize: Int,
-  val useAdaGrad: Boolean) extends MVM(data, views, rank) {
+  override val stepSize: Double,
+  override val regParam: Double,
+  override val batchSize: Int,
+  override val useAdaGrad: Boolean) extends MVM(data, views, rank) {
 
   override def saveModel(): MVMModel = {
-    new MVMModel(rank, views, true, features.map(t => (t._1.toLong, t._2)), 1, 0)
+    new MVMModel(rank, views, true, features.map(t => (t._1.toLong, t._2)), 1D, 0D)
   }
 
   override def predict(arr: Array[Double]): Double = {
@@ -413,11 +413,11 @@ class MVMClassification(
   }
 
   override def multiplier(arr: Array[Double], label: Double): (Array[Double], Double) = {
-    val ret = MVM.sumInterval(rank, arr)
-    val z = ret.last
+    val multi = MVM.sumInterval(rank, arr)
+    val z = multi.last
     val diff = sigmoid(z) - label
-    ret(arr.length - 1) = diff
-    (ret, Utils.log1pExp(if (label > 0D) -z else z))
+    multi(multi.length - 1) = diff
+    (multi, Utils.log1pExp(if (label > 0D) -z else z))
   }
 }
 
