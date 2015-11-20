@@ -123,7 +123,7 @@ private[ml] abstract class MVM(
 
   def run(iterations: Int): Unit = {
     for (epoch <- 1 to iterations) {
-      // cleanGardSum(math.exp(-math.log(2D) / 30))
+      // cleanGardSum(math.exp(-math.log(2D) / 20))
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val pSize = data.partitions.length
       val startedAt = System.nanoTime()
@@ -179,11 +179,12 @@ private[ml] abstract class MVM(
     while (i < ssv.indices.length) {
       val featureId = ssv.indices(i)
       val value = ssv.values(i)
+      val w = features(fId2Offset(featureId))
       val viewId = featureId2viewId(featureId, views)
       val b = backward(rank, viewId, value, multi, multi.last)
       for (rankId <- 0 until rank) {
         assert(!(b(rankId).isNaN || b(rankId).isInfinity))
-        b(rankId) += regParam * features(fId2Offset(featureId))(rankId)
+        b(rankId) += regParam * w(rankId)
       }
       if (grad(fId2Offset(featureId)) == null) {
         grad(fId2Offset(featureId)) = b
@@ -195,11 +196,12 @@ private[ml] abstract class MVM(
 
     viewFeaturesIds.foreach { featureId =>
       val viewId = featureId2viewId(featureId, views)
+      val w = features(fId2Offset(featureId))
       val value = 1D
       val b = backward(rank, viewId, value, multi, multi.last)
       for (rankId <- 0 until rank) {
         assert(!(b(rankId).isNaN || b(rankId).isInfinity))
-        b(rankId) += regParam * features(fId2Offset(featureId))(rankId)
+        b(rankId) += regParam * w(rankId)
       }
       if (grad(fId2Offset(featureId)) == null) {
         grad(fId2Offset(featureId)) = b
@@ -217,14 +219,16 @@ private[ml] abstract class MVM(
     while (i < ssv.indices.length) {
       val featureId = ssv.indices(i)
       val value = ssv.values(i)
+      val w = features(fId2Offset(featureId))
       val viewId = featureId2viewId(featureId, views)
-      forward(rank, viewId, arr, value, features(fId2Offset(featureId)))
+      forward(rank, viewId, arr, value, w)
       i += 1
     }
     viewFeaturesIds.foreach { featureId =>
       val viewId = featureId2viewId(featureId, views)
+      val w = features(fId2Offset(featureId))
       val value = 1D
-      forward(rank, viewId, arr, value, features(fId2Offset(featureId)))
+      forward(rank, viewId, arr, value, w)
     }
   }
 
@@ -239,7 +243,7 @@ private[ml] abstract class MVM(
     iter: Int): Unit = {
     if (useAdaGrad) adaGrad(grad, featuresIds, psClient)
     val rankIndices = 0 until rank
-    val a = 0.501 // (0.5, 1]
+    val a = 0.6 // (0.5, 1]
     val b = 48D
     val epsilon = stepSize * math.pow(iter + b, -a)
     val tis = if (useAdaGrad) stepSize else epsilon
@@ -249,7 +253,7 @@ private[ml] abstract class MVM(
       // val w = features(i)
       val vid = featuresIds(i)
       val ng = newGrad(i)
-      val deg = 1D
+      val deg = g.last
       assert(deg <= 1D)
       val viewId = featureId2viewId(vid, views)
       rankIndices.foreach { rankId =>
