@@ -27,7 +27,7 @@ import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
-  ignore("movieLens 100k (uid,mid) ") {
+  test("movieLens 100k (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -66,10 +66,10 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.1
+    val stepSize = 0.05
     val numIterations = 10000
-    val regParam = 0.065
-    val rank = 16
+    val regParam = 0.1
+    val rank = 32
     val useAdaGrad = true
     val miniBatch = 100
 
@@ -91,7 +91,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     }
   }
 
-  test("binary classification") {
+  ignore("binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
     val checkpoint = s"$sparkHome/target/tmp"
