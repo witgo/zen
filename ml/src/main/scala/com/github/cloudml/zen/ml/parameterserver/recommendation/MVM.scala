@@ -17,13 +17,13 @@
 
 package com.github.cloudml.zen.ml.parameterserver.recommendation
 
-import java.util.UUID
+import java.util.{Random => JavaRandom, UUID}
 
 import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import com.github.cloudml.zen.graphx.util.CompletionIterator
 import com.github.cloudml.zen.ml.recommendation.MVMModel
-import com.github.cloudml.zen.ml.util.{SparkUtils, Utils}
+import com.github.cloudml.zen.ml.util.{XORShiftRandom, SparkUtils, Utils}
 import org.apache.commons.math3.distribution.GammaDistribution
 import org.apache.commons.math3.random.{RandomGenerator, Well19937c}
 import org.apache.spark.Logging
@@ -50,6 +50,8 @@ private[ml] abstract class MVM(
   def regParam: Double
 
   def batchSize: Int
+
+  def samplingFraction: Double = 1D
 
   private var innerEpoch: Int = 1
   var storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK
@@ -123,22 +125,28 @@ private[ml] abstract class MVM(
 
   def run(iterations: Int): Unit = {
     for (epoch <- 1 to iterations) {
-      // cleanGardSum(math.exp(-math.log(2D) / 20))
+      // cleanGardSum(math.exp(-math.log(2D) / 40))
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val startedAt = System.nanoTime()
-      val gammaDist = samplingGammaDist()
+      //  samplingGammaDist()
+      val gammaDist: Array[Double] = null
       val thisStepSize = stepSize
-      // val lossSum = data.sortBy(t => Utils.random.nextLong()).mapPartitionsWithIndex { case (pid, iter) =>
-      val costSum = data.mapPartitionsWithIndex { case (pid, iter) =>
+      val pSize = data.partitions.length
+      val sampledData = if (samplingFraction == 1D) {
+        data
+      } else {
+        data.sample(withReplacement = false, samplingFraction, innerEpoch + 17)
+      }
+      val costSum = sampledData.mapPartitionsWithIndex { case (pid, iter) =>
         val psClient = new PSClient(new PSConf(true))
         val reader = new MatrixReader(psClient, weightName)
-        val rand = new Well19937c(Array(innerEpoch, pid))
+        val rand = new XORShiftRandom(innerEpoch * pSize + pid)
         var innerIter = 0
         val newIter = iter.grouped(batchSize).map { samples =>
           var costSum = 0D
-          val sampleSize = samples.length
+          val sampledSize = samples.length
           val featureIds = (samples.map(_.features.toSparse).flatMap(_.indices).distinct ++
-            viewFeaturesIds).sortBy(t => t).toArray
+            viewFeaturesIds).sorted.toArray
           val features = rowData2Array(reader.read(featureIds))
           val f2i = featureIds.zipWithIndex.toMap
           val grad = new Array[VD](featureIds.length)
@@ -146,26 +154,28 @@ private[ml] abstract class MVM(
             val ssv = sample.features.toSparse
             val indices = ssv.indices
             val values = ssv.values
-            // val values = ssv.values.map(v => v + rand.nextGaussian() * 1E-2D)
+            // val values = ssv.values.map(v => v + rand.nextGaussian() * 1E-1)
             val arr = new Array[Double](rank * viewSize)
             val label = sample.label
             forwardSample(indices, values, f2i, features, arr)
             val (multi, loss) = multiplier(arr, label)
             costSum += loss
-            backwardSample(indices, values, multi, gammaDist, rand, f2i, features, grad)
+            backwardSample(indices, values, multi, f2i, features, grad)
           }
 
           reader.clear()
-          grad.foreach(g => g.indices.foreach(i => g(i) /= sampleSize))
+          grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
+          l2(gammaDist, rand, featureIds, features, grad)
 
           innerIter += 1
-          updateWeight(grad, features, featureIds, psClient, rand, thisStepSize, innerIter)
-          costSum
+          updateWeight(grad, features, featureIds, psClient, gammaDist, rand, thisStepSize, innerIter)
+          Array(costSum, sampledSize.toDouble)
         }
-        CompletionIterator[Double, Iterator[Double]](newIter, psClient.close())
-      }.sum
+        CompletionIterator[Array[Double], Iterator[Array[Double]]](newIter, psClient.close())
+      }.reduce(reduceInterval)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      println(s"(Iteration $epoch/$iterations) loss:                     ${lossSum(costSum, numSamples)}")
+      val loss = lossSum(costSum.head, costSum.last.toLong)
+      println(s"(Iteration $epoch/$iterations) loss:                     $loss")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
     }
@@ -175,8 +185,6 @@ private[ml] abstract class MVM(
     indices: Array[Int],
     values: Array[Double],
     multi: Array[Double],
-    gammaDist: Array[Double],
-    rand: RandomGenerator,
     fId2Offset: Map[Int, Int],
     features: Array[VD],
     grad: Array[VD]): Unit = {
@@ -184,36 +192,38 @@ private[ml] abstract class MVM(
     while (i < indices.length) {
       val featureId = indices(i)
       val value = values(i)
-      val w = features(fId2Offset(featureId))
+      val fo = fId2Offset(featureId)
       val viewId = featureId2viewId(featureId, views)
       val b = backward(rank, viewId, value, multi, multi.last)
-      for (rankId <- 0 until rank) {
-        assert(!(b(rankId).isNaN || b(rankId).isInfinity))
-        val gamma = gammaDist(rankId + viewId * rank)
-        b(rankId) += regParam * w(rankId) + rand.nextGaussian() * gamma
-      }
-      if (grad(fId2Offset(featureId)) == null) {
-        grad(fId2Offset(featureId)) = b
-      } else {
-        reduceInterval(grad(fId2Offset(featureId)), b)
-      }
+      if (grad(fo) == null) grad(fo) = b else reduceInterval(grad(fo), b)
       i += 1
     }
 
     viewFeaturesIds.foreach { featureId =>
       val viewId = featureId2viewId(featureId, views)
-      val w = features(fId2Offset(featureId))
+      val fo = fId2Offset(featureId)
       val value = 1D
       val b = backward(rank, viewId, value, multi, multi.last)
+      if (grad(fo) == null) grad(fo) = b else reduceInterval(grad(fo), b)
+    }
+  }
+
+  private def l2(
+    gammaDist: Array[Double],
+    rand: JavaRandom,
+    featureIds: Array[Int],
+    features: Array[VD],
+    grad: Array[VD]): Unit = {
+    features.indices.foreach { i =>
+      val featureId = featureIds(i)
+      val viewId = featureId2viewId(featureId, views)
+      val w = features(i)
+      val g = grad(i)
+      val deg = g.last
       for (rankId <- 0 until rank) {
-        assert(!(b(rankId).isNaN || b(rankId).isInfinity))
-        val gamma = gammaDist(rankId + viewId * rank)
-        b(rankId) += regParam * w(rankId) + rand.nextGaussian() * gamma
-      }
-      if (grad(fId2Offset(featureId)) == null) {
-        grad(fId2Offset(featureId)) = b
-      } else {
-        reduceInterval(grad(fId2Offset(featureId)), b)
+        assert(!(g(rankId).isNaN || g(rankId).isInfinity))
+        // val gamma = gammaDist(rankId + viewId * rank)
+        g(rankId) += deg * regParam * w(rankId)
       }
     }
   }
@@ -228,14 +238,16 @@ private[ml] abstract class MVM(
     while (i < indices.length) {
       val featureId = indices(i)
       val value = values(i)
-      val w = features(fId2Offset(featureId))
+      val fo = fId2Offset(featureId)
+      val w = features(fo)
       val viewId = featureId2viewId(featureId, views)
       forward(rank, viewId, arr, value, w)
       i += 1
     }
     viewFeaturesIds.foreach { featureId =>
       val viewId = featureId2viewId(featureId, views)
-      val w = features(fId2Offset(featureId))
+      val fo = fId2Offset(featureId)
+      val w = features(fo)
       val value = 1D
       forward(rank, viewId, arr, value, w)
     }
@@ -246,35 +258,58 @@ private[ml] abstract class MVM(
     features: Array[VD],
     featuresIds: Array[Int],
     psClient: PSClient,
-    rand: RandomGenerator,
+    gammaDist: Array[Double],
+    rand: JavaRandom,
     stepSize: Double,
     iter: Int): Unit = {
-    if (useAdaGrad) adaGrad(grad, featuresIds, psClient)
     val rankIndices = 0 until rank
-    val epsilon = stepSize * math.pow(iter + 48D, -0.51)
-    // val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
-    val tis = if (useAdaGrad) stepSize else epsilon
     val newGrad = Array.fill(featuresIds.length)(new VD(rank))
-    featuresIds.indices.foreach { i =>
-      val g = grad(i)
-      // val w = features(i)
-      // val vid = featuresIds(i)
-      val ng = newGrad(i)
-      val deg = g.last
-      assert(deg <= 1D)
-      // val viewId = featureId2viewId(vid, views)
-      rankIndices.foreach { rankId =>
-        val nu = deg * rand.nextGaussian() * math.sqrt(2D * epsilon / numSamples)
-        ng(rankId) = -tis * g(rankId) + nu
+    if (useAdaGrad) {
+      val g2Sum = adaGrad(grad, featuresIds, psClient)
+      // val nuEpsilon = stepSize * math.pow(iter + 48D, -0.51)
+      // val nuEpsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
+      val nuEpsilon = 2D * stepSize / numSamples
+      featuresIds.indices.foreach { i =>
+        val g2 = g2Sum(i)
+        val g = grad(i)
+        // val w = features(i)
+        val vid = featuresIds(i)
+        val ng = newGrad(i)
+        val deg = g.last
+        assert(deg <= 1D)
+        val viewId = featureId2viewId(vid, views)
+        rankIndices.foreach { rankId =>
+          val nu = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / g2(rankId))
+          // val nu = deg * rand.nextGaussian() * gammaDist(rankId + viewId * rank) * nuEpsilon
+          ng(rankId) = -stepSize * g(rankId) + nu
+        }
+      }
+    } else {
+      // val epsilon = stepSize * math.pow(iter + 48D, -0.51)
+      val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
+      val tis = epsilon
+      featuresIds.indices.foreach { i =>
+        val g = grad(i)
+        // val w = features(i)
+        // val vid = featuresIds(i)
+        val ng = newGrad(i)
+        // val deg = g.last
+        // assert(deg <= 1D)
+        // val viewId = featureId2viewId(vid, views)
+        rankIndices.foreach { rankId =>
+          val nu = rand.nextGaussian() * math.sqrt(2D * epsilon / numSamples)
+          ng(rankId) = -tis * g(rankId) + nu
+        }
       }
     }
+
     psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
   }
 
   def adaGrad(
     grad: Array[VD],
     featuresIds: Array[Int],
-    psClient: PSClient): Unit = {
+    psClient: PSClient): Array[VD] = {
     val rankIndices = 0 until rank
     val t2Sum = grad.map { g =>
       val t2 = new Array[Double](rank)
@@ -294,31 +329,24 @@ private[ml] abstract class MVM(
       val sum = g2Sum(i)
       val t2 = t2Sum(i)
       rankIndices.foreach { offset =>
-        g(offset) /= (1E-6 + math.sqrt(sum(offset) + t2(offset)))
+        sum(offset) = 1E-6 + math.sqrt(sum(offset) + t2(offset))
+        g(offset) /= sum(offset)
       }
     }
     psClient.add2Matrix(gardSumName, array2RowData(t2Sum, featuresIds))
+    g2Sum
   }
 
   private def samplingGammaDist(): Array[Double] = {
     val rankIndices = 0 until rank
     val viewSize = views.length
-    val features = this.features.persist(storageLevel)
-    val mean = features.aggregate(new Array[Double](rank * viewSize))((arr, a) => {
+    val dist = features.aggregate(new Array[Double]((rank + 1) * viewSize))((arr, a) => {
       val (vid, weight) = a
       val viewId = featureId2viewId(vid, views)
-      for (i <- rankIndices) {
-        arr(i + viewId * rank) += weight(i)
-      }
-      arr
-    }, reduceInterval)
-    val dist = features.aggregate(new Array[Double](2 * rank * viewSize))((arr, a) => {
-      val (vid, weight) = a
-      val viewId = featureId2viewId(vid, views)
-      for (i <- rankIndices) {
-        val offset = i + viewId * rank
-        arr(offset) += 1
-        arr(offset + viewSize * rank) += math.pow(weight(i) - mean(offset), 2)
+      arr(rank * viewSize + viewId) += 1
+      for (rankId <- rankIndices) {
+        val offset = rankId + viewId * rank
+        arr(offset) += math.pow(weight(rankId), 2)
       }
       arr
     }, reduceInterval)
@@ -327,17 +355,17 @@ private[ml] abstract class MVM(
     val beta = 1D
     val rand = new Well19937c(Utils.random.nextLong())
     for (viewId <- 0 until viewSize) {
+      val shape = alpha + dist(rank * viewSize + viewId) / 2D
       for (rankId <- rankIndices) {
         val offset = rankId + viewId * rank
-        val shape = (alpha + dist(offset)) / 2D
-        val scale = (beta + dist(offset + viewSize * rank)) / 2D
+        val scale = beta + dist(offset) / 2D
         val rng = new GammaDistribution(rand, shape, scale)
         gamma(offset) = math.sqrt(1D / rng.sample())
       }
     }
-    features.unpersist(blocking = false)
     gamma
   }
+
 
   def saveModel(): MVMModel
 
@@ -363,8 +391,10 @@ class MVMRegression(
   override val stepSize: Double,
   override val regParam: Double,
   override val batchSize: Int,
-  override val useAdaGrad: Boolean) extends MVM(data, views, rank) {
-
+  override val useAdaGrad: Boolean,
+  override val samplingFraction: Double = 1D) extends MVM(data, views, rank) {
+  require(samplingFraction > 0 && samplingFraction <= 1,
+    s"Sampling fraction ($samplingFraction) must be > 0 and <= 1")
   val max = data.map(_.label).max
   val min = data.map(_.label).min
 
@@ -402,7 +432,10 @@ class MVMClassification(
   override val stepSize: Double,
   override val regParam: Double,
   override val batchSize: Int,
-  override val useAdaGrad: Boolean) extends MVM(data, views, rank) {
+  override val useAdaGrad: Boolean,
+  override val samplingFraction: Double = 1D) extends MVM(data, views, rank) {
+  require(samplingFraction > 0 && samplingFraction <= 1,
+    s"Sampling fraction ($samplingFraction) must be > 0 and <= 1")
 
   override def saveModel(): MVMModel = {
     new MVMModel(rank, views, true, features.map(t => (t._1.toLong, t._2)), 1D, 0D)
@@ -442,8 +475,9 @@ object MVM {
     stepSize: Double,
     regParam: Double,
     miniBatch: Int = 100,
-    useAdaGrad: Boolean = false): MVMModel = {
-    val mvm = new MVMRegression(input, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
+    useAdaGrad: Boolean = false,
+    samplingFraction: Double = 1D): MVMModel = {
+    val mvm = new MVMRegression(input, views, rank, stepSize, regParam, miniBatch, useAdaGrad, samplingFraction)
     mvm.run(numIterations)
     mvm.saveModel()
   }
@@ -456,16 +490,17 @@ object MVM {
     stepSize: Double,
     regParam: Double,
     miniBatch: Int = 100,
-    useAdaGrad: Boolean = false): MVMModel = {
+    useAdaGrad: Boolean = false,
+    samplingFraction: Double = 1D): MVMModel = {
     val data = input.map { case LabeledPoint(label, features) =>
       LabeledPoint(if (label > 0D) 1D else 0D, features)
     }
-    val mvm = new MVMClassification(data, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
+    val mvm = new MVMClassification(data, views, rank, stepSize, regParam, miniBatch, useAdaGrad, samplingFraction)
     mvm.run(numIterations)
     mvm.saveModel()
   }
 
-  private[ml] def rowData2Array(rows: Array[RowData]): Array[Array[Double]] = {
+  private[ml] def rowData2Array(rows: Array[RowData]): Array[VD] = {
     rows.map(_.getData.getValues.asInstanceOf[DoubleArray].getValues)
   }
 

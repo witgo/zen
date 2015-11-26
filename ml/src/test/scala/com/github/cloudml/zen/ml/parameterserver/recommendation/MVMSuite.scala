@@ -73,7 +73,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val useAdaGrad = true
     val miniBatch = 100
 
-    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
+    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad, 1D)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
