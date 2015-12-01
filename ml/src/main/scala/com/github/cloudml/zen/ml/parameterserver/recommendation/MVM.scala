@@ -128,8 +128,7 @@ private[ml] abstract class MVM(
       // cleanGardSum(math.exp(-math.log(2D) / 40))
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val startedAt = System.nanoTime()
-      //  samplingGammaDist()
-      val gammaDist: Array[Double] = null
+      val gammaDist: Array[Double] = samplingGammaDist()
       val thisStepSize = stepSize
       val pSize = data.partitions.length
       val sampledData = if (samplingFraction == 1D) {
@@ -141,6 +140,7 @@ private[ml] abstract class MVM(
         val psClient = new PSClient(new PSConf(true))
         val reader = new MatrixReader(psClient, weightName)
         val rand = new XORShiftRandom(innerEpoch * pSize + pid)
+        val regRand = new GammaDistribution(new Well19937c(rand.nextLong()), 1D, regParam)
         var innerIter = 0
         val newIter = iter.grouped(batchSize).map { samples =>
           var costSum = 0D
@@ -165,7 +165,7 @@ private[ml] abstract class MVM(
 
           reader.clear()
           grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
-          l2(gammaDist, rand, featureIds, features, grad)
+          l2(gammaDist, rand, regRand, featureIds, features, grad)
 
           innerIter += 1
           updateWeight(grad, features, featureIds, psClient, gammaDist, rand, thisStepSize, innerIter)
@@ -211,9 +211,11 @@ private[ml] abstract class MVM(
   private def l2(
     gammaDist: Array[Double],
     rand: JavaRandom,
+    regRand: GammaDistribution,
     featureIds: Array[Int],
     features: Array[VD],
     grad: Array[VD]): Unit = {
+    val regDist = regRand.sample(viewSize * rank)
     features.indices.foreach { i =>
       val featureId = featureIds(i)
       val viewId = featureId2viewId(featureId, views)
@@ -222,8 +224,10 @@ private[ml] abstract class MVM(
       val deg = g.last
       for (rankId <- 0 until rank) {
         assert(!(g(rankId).isNaN || g(rankId).isInfinity))
-        // val gamma = gammaDist(rankId + viewId * rank)
-        g(rankId) += deg * regParam * w(rankId)
+        val reg = regDist(rankId + viewId * rank)
+        val gamma = gammaDist(rankId + viewId * rank)
+        g(rankId) += deg * (reg * w(rankId) + rand.nextGaussian() * gamma)
+        // g(rankId) += deg * reg * w(rankId)
       }
     }
   }
@@ -280,13 +284,14 @@ private[ml] abstract class MVM(
         val viewId = featureId2viewId(vid, views)
         rankIndices.foreach { rankId =>
           val nu = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / g2(rankId))
-          // val nu = deg * rand.nextGaussian() * gammaDist(rankId + viewId * rank) * nuEpsilon
+          // if (Utils.random.nextDouble() < 1E-7) println(g2(rankId))
+          // val gamma = deg * rand.nextGaussian() * gammaDist(rankId + viewId * rank) / g2(rankId)
           ng(rankId) = -stepSize * g(rankId) + nu
         }
       }
     } else {
-      // val epsilon = stepSize * math.pow(iter + 48D, -0.51)
-      val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
+      val epsilon = stepSize * math.pow(iter + 48D, -0.51)
+      // val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
       val tis = epsilon
       featuresIds.indices.foreach { i =>
         val g = grad(i)
