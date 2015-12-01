@@ -95,7 +95,7 @@ private[ml] abstract class MVM(
       val psClient = new PSClient(new PSConf(true))
       val gName = UUID.randomUUID().toString
       psClient.createMatrix(gName, weightName)
-      psClient.matrixAxpby(gName, 1D, weightName, 0D)
+      // psClient.matrixAxpby(gName, 1D, weightName, 0D)
       psClient.close()
       gName
     } else {
@@ -128,7 +128,8 @@ private[ml] abstract class MVM(
       // cleanGardSum(math.exp(-math.log(2D) / 40))
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val startedAt = System.nanoTime()
-      val gammaDist: Array[Double] = samplingGammaDist()
+      val gammaDist: Array[Double] = null
+      // samplingGammaDist()
       val thisStepSize = stepSize
       val pSize = data.partitions.length
       val sampledData = if (samplingFraction == 1D) {
@@ -225,9 +226,9 @@ private[ml] abstract class MVM(
       for (rankId <- 0 until rank) {
         assert(!(g(rankId).isNaN || g(rankId).isInfinity))
         val reg = regDist(rankId + viewId * rank)
-        val gamma = gammaDist(rankId + viewId * rank)
-        g(rankId) += deg * (reg * w(rankId) + rand.nextGaussian() * gamma)
-        // g(rankId) += deg * reg * w(rankId)
+        // val gamma = gammaDist(rankId + viewId * rank)
+        // g(rankId) += deg * (reg * w(rankId) + rand.nextGaussian() * gamma)
+        g(rankId) += deg * reg * w(rankId)
       }
     }
   }
@@ -506,7 +507,14 @@ object MVM {
   }
 
   private[ml] def rowData2Array(rows: Array[RowData]): Array[VD] = {
-    rows.map(_.getData.getValues.asInstanceOf[DoubleArray].getValues)
+    rows.map { row =>
+      val pv = row.getData
+      if (pv.getValues == null) {
+        new VD(pv.getSize)
+      } else {
+        pv.getValues.asInstanceOf[DoubleArray].getValues
+      }
+    }
   }
 
   private[ml] def array2RowData(values: Array[VD], features: Array[Int]): Array[RowData] = {
