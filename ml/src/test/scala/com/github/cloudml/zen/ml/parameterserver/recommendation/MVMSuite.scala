@@ -66,7 +66,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.05
+    val stepSize = 0.1
     val numIterations = 10000
     val regParam = 0.1
     val rank = 32
@@ -77,10 +77,10 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
-      val thisItr = if (iter < 6) {
-        math.min(3, numIterations - iter)
+      val thisItr = if (iter < 10) {
+        math.min(5, numIterations - iter)
       } else {
-        math.min(3, numIterations - iter)
+        math.min(5, numIterations - iter)
       }
       iter += thisItr
       lfm.run(thisItr)
