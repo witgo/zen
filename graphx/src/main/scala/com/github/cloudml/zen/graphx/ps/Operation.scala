@@ -108,14 +108,15 @@ private[graphx] abstract class BVOperation[V: ClassTag : Zero] extends VectorOpe
     for (i <- data.indices) {
       val rd = data(i)
       val pv = rd.getData
-      rowDatas(i) = if (pv == null || pv.getValues == null) {
-        BSV.zeros[V](Int.MaxValue)
+      val size = pv.getSize
+      rowDatas(i) = if (pv.getValues == null) {
+        BSV.zeros[V](size)
       } else if (pv.isInstanceOf[PDV]) {
         val pdv = pv.asInstanceOf[PDV]
         BDV[V](psArray2JavaArray(pdv.getValues))
       } else {
         val psv = pv.asInstanceOf[PSV]
-        new BSV[V](psv.getIndices, psArray2JavaArray(psv.getValues), psv.getSize)
+        new BSV[V](psv.getIndices, psArray2JavaArray(psv.getValues), size)
       }
     }
     rowDatas
@@ -147,14 +148,15 @@ private[graphx] abstract class BSVOperation[V: ClassTag : Zero] extends VectorOp
     for (i <- data.indices) {
       val rd = data(i)
       val pv = rd.getData
-      rowDatas(i) = if (pv == null || pv.getValues == null) {
-        BSV.zeros[V](Int.MaxValue)
+      val size = pv.getSize
+      rowDatas(i) = if (pv.getValues == null) {
+        BSV.zeros[V](size)
       } else if (pv.isInstanceOf[PDV]) {
         val pdv = pv.asInstanceOf[PDV]
-        new BSV[V]((0 until pdv.getSize).toArray, psArray2JavaArray(pdv.getValues), pdv.getSize)
+        new BSV[V]((0 until pdv.getSize).toArray, psArray2JavaArray(pdv.getValues), size)
       } else {
         val psv = pv.asInstanceOf[PSV]
-        new BSV[V](psv.getIndices, psArray2JavaArray(psv.getValues), psv.getSize)
+        new BSV[V](psv.getIndices, psArray2JavaArray(psv.getValues), size)
       }
     }
     rowDatas
@@ -186,8 +188,9 @@ private[graphx] abstract class BDVOperation[V: ClassTag : Zero] extends VectorOp
     for (i <- data.indices) {
       val rd = data(i)
       val pv = rd.getData
-      rowDatas(i) = if (pv == null || pv.getValues == null) {
-        BDV.zeros[V](Int.MaxValue)
+      val size = pv.getSize
+      rowDatas(i) = if (pv.getValues == null) {
+        BDV.zeros[V](size)
       } else {
         val pdv = pv.asInstanceOf[PDV]
         BDV[V](psArray2JavaArray(pdv.getValues))
@@ -470,8 +473,9 @@ object Operation {
       for (i <- data.indices) {
         val rd = data(i)
         val pv = rd.getData
-        rowDatas(i) = if (pv == null || pv.getValues == null) {
-          new SSV(Int.MaxValue, Array.empty[Int], Array.empty[Double])
+        val size = pv.getSize
+        rowDatas(i) = if (pv.getValues == null) {
+          new SSV(size, Array.empty[Int], Array.empty[Double])
         } else if (pv.isInstanceOf[PDV]) {
           val pdv = pv.asInstanceOf[PDV]
           new SDV(pdv.getValues.asInstanceOf[DoubleArray].getValues)
@@ -505,11 +509,12 @@ object Operation {
       for (i <- data.indices) {
         val rd = data(i)
         val pv = rd.getData
-        rowDatas(i) = if (pv == null || pv.getValues == null) {
-          new SSV(Int.MaxValue, Array.empty[Int], Array.empty[Double])
+        val size = pv.getSize
+        rowDatas(i) = if (pv.getValues == null) {
+          new SSV(size, Array.empty[Int], Array.empty[Double])
         } else {
           val psv = pv.asInstanceOf[PSV]
-          new SSV(psv.getSize, psv.getIndices, psv.getValues.asInstanceOf[DoubleArray].getValues)
+          new SSV(size, psv.getIndices, psv.getValues.asInstanceOf[DoubleArray].getValues)
         }
       }
       rowDatas
@@ -536,7 +541,12 @@ object Operation {
       for (i <- data.indices) {
         val rd = data(i)
         val pv = rd.getData
-        rowDatas(i) = new SDV(pv.asInstanceOf[PDV].getValues.asInstanceOf[DoubleArray].getValues)
+        val size = pv.getSize
+        rowDatas(i) = if (pv.getValues == null) {
+          new SDV(new Array[Double](size))
+        } else {
+          new SDV(pv.asInstanceOf[PDV].getValues.asInstanceOf[DoubleArray].getValues)
+        }
       }
       rowDatas
     }
