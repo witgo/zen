@@ -16,9 +16,12 @@
  */
 package com.github.cloudml.zen.examples.ml
 
+import java.nio.charset.Charset
+
 import breeze.linalg.{SparseVector => BSV}
 import com.github.cloudml.zen.ml.recommendation.{ThreeWayFMModel, ThreeWayFMRegression, ThreeWayFM}
 import com.github.cloudml.zen.ml.util.SparkHacker
+import com.google.common.io.Files
 import org.apache.spark.graphx.GraphXUtils
 import org.apache.spark.mllib.linalg.{SparseVector => SSV}
 import org.apache.spark.storage.StorageLevel
@@ -30,55 +33,31 @@ object MovieLensThreeWayFM extends Logging {
   case class Params(
     input: String = null,
     out: String = null,
-    numIterations: Int = 40,
+    confPath: String = null,
     numPartitions: Int = -1,
-    stepSize: Double = 0.1,
-    regular: String = "0.01,0.01,0.01,0.01",
-    rank2: Int = 10,
-    rank3: Int = 10,
     useAdaGrad: Boolean = false,
     useWeightedLambda: Boolean = false,
-    useSVDPlusPlus: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
 
   def main(args: Array[String]) {
     val defaultParams = Params()
     val parser = new OptionParser[Params]("MovieLensThreeWayFM") {
       head("MovieLensThreeWayFM: an example app for ThreeWayFM.")
-      opt[Int]("numIterations")
-        .text(s"number of iterations, default: ${defaultParams.numIterations}")
-        .action((x, c) => c.copy(numIterations = x))
       opt[Int]("numPartitions")
         .text(s"number of partitions, default: ${defaultParams.numPartitions}")
         .action((x, c) => c.copy(numPartitions = x))
-      opt[Int]("rank2")
-        .text(s"dim of 2-way interactions, default: ${defaultParams.rank2}")
-        .action((x, c) => c.copy(rank2 = x))
-      opt[Int]("rank3")
-        .text(s"dim of 3-way interactions, default: ${defaultParams.rank2}")
-        .action((x, c) => c.copy(rank3 = x))
+      opt[String]("confPath")
+        .text(s"conf file Path, default: ${defaultParams.confPath}")
+        .action((x, c) => c.copy(confPath = x))
       opt[Unit]("kryo")
         .text("use Kryo serialization")
         .action((_, c) => c.copy(kryo = true))
-      opt[Double]("stepSize")
-        .text(s"stepSize, default: ${defaultParams.stepSize}")
-        .action((x, c) => c.copy(stepSize = x))
-      opt[String]("regular")
-        .text(
-          s"""
-             |'r0,r1,r2,r3' for SGD: r0=bias regularization, r1=1-way regularization, r2=2-way regularization,
-             |r2=3-way regularization default: ${defaultParams.regular} (auto)
-           """.stripMargin)
-        .action((x, c) => c.copy(regular = x))
       opt[Unit]("adagrad")
         .text("use AdaGrad")
         .action((_, c) => c.copy(useAdaGrad = true))
       opt[Unit]("weightedLambda")
         .text("use weighted lambda regularization")
         .action((_, c) => c.copy(useWeightedLambda = true))
-      opt[Unit]("svdPlusPlus")
-        .text("use SVD++")
-        .action((_, c) => c.copy(useSVDPlusPlus = true))
       arg[String]("<input>")
         .required()
         .text("input paths")
@@ -107,11 +86,9 @@ object MovieLensThreeWayFM extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, regular,
-    rank2, rank3, useAdaGrad, useWeightedLambda, useSVDPlusPlus, kryo) = params
-    val storageLevel = if (useSVDPlusPlus) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
-    val regs = regular.split(",").map(_.toDouble)
-    val l2 = (regs(0), regs(1), regs(2), regs(3))
+    val Params(input, out, confPath, numPartitions, useAdaGrad, useWeightedLambda, kryo) = params
+    val storageLevel = StorageLevel.MEMORY_AND_DISK
+
     val conf = new SparkConf().setAppName(s"ThreeWayFM with $params")
     if (kryo) {
       GraphXUtils.registerKryoClasses(conf)
@@ -121,31 +98,44 @@ object MovieLensThreeWayFM extends Logging {
     val checkpointDir = s"$out/checkpoint"
     sc.setCheckpointDir(checkpointDir)
     SparkHacker.gcCleaner(60 * 10, 60 * 10, "MovieLensThreeWayFM")
-    val (trainSet, testSet, views) = if (useSVDPlusPlus) {
-      MovieLensUtils.genSamplesSVDPlusPlus(sc, input, numPartitions, storageLevel)
+    val (trainSet, testSet, validationSet, views) = MovieLensUtils.crossValidation(sc,
+      input, numPartitions, storageLevel)
+    import scala.collection.JavaConversions._
+    val lines = Files.readLines(new java.io.File(confPath), Charset.defaultCharset())
+    lines.filter(l => !l.startsWith("#")).foreach { line =>
+      val arr = line.trim.split("\\s+").filter(_.nonEmpty)
+      val rank2 = arr(0).toInt
+      val rank3 = arr(1).toInt
+      val stepSize = arr(2).toDouble
+      val regs = arr(3).split(",").map(_.toDouble)
+      val l2 = (regs(0), regs(1), regs(2), regs(3))
+      val numIterations = arr(4).toInt
+      val isValidation = if (arr.length > 5) arr(5).toBoolean else true
+      val lfm = new ThreeWayFMRegression(trainSet, stepSize, views, l2, rank2, rank3,
+        useAdaGrad, useWeightedLambda, 1.0, storageLevel)
+      var iter = 0
+      var model: ThreeWayFMModel = null
+      while (iter < numIterations) {
+        val thisItr = math.min(50, numIterations - iter)
+        iter += thisItr
+        if (model != null) model.factors.unpersist(false)
+        lfm.run(thisItr)
+        model = lfm.saveModel()
+        model.factors.persist(storageLevel)
+        model.factors.count()
+        val pout = s"rank2=$rank2 rank3=$rank3 stepSize=$stepSize l2=$l2"
+        if (isValidation) {
+          val rmse = model.loss(validationSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) validation RMSE:                     $rmse%1.4f")
+          println(f"(Iteration $iter/$numIterations $pout) validation RMSE:                     $rmse%1.4f")
+        } else {
+          val rmse = model.loss(testSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Test RMSE:                     $rmse%1.4f")
+          println(f"(Iteration $iter/$numIterations $pout) Test RMSE:                     $rmse%1.4f")
+        }
+      }
+      // model.save(sc, out)
     }
-    else {
-      MovieLensUtils.genSamplesWithTime(sc, input, numPartitions, storageLevel)
-    }
-
-    val lfm = new ThreeWayFMRegression(trainSet, stepSize, views, l2, rank2, rank3,
-      useAdaGrad, useWeightedLambda, 1.0, storageLevel)
-    var iter = 0
-    var model: ThreeWayFMModel = null
-    while (iter < numIterations) {
-      val thisItr = math.min(50, numIterations - iter)
-      iter += thisItr
-      if (model != null) model.factors.unpersist(false)
-      lfm.run(thisItr)
-      model = lfm.saveModel()
-      model.factors.persist(storageLevel)
-      model.factors.count()
-      val rmse = model.loss(testSet)
-      logInfo(f"(Iteration $iter/$numIterations) Test AUC:                     $rmse%1.4f")
-      println(f"(Iteration $iter/$numIterations) Test AUC:                     $rmse%1.4f")
-    }
-    model.save(sc, out)
-
     sc.stop()
   }
 }

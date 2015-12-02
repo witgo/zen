@@ -16,9 +16,12 @@
  */
 package com.github.cloudml.zen.examples.ml
 
+import java.nio.charset.Charset
+
 import breeze.linalg.{SparseVector => BSV}
 import com.github.cloudml.zen.ml.recommendation.{FMRegression, FMModel, FMClassification, FM}
 import com.github.cloudml.zen.ml.util.SparkHacker
+import com.google.common.io.Files
 import org.apache.spark.graphx.GraphXUtils
 import org.apache.spark.mllib.linalg.{SparseVector => SSV}
 import org.apache.spark.storage.StorageLevel
@@ -30,47 +33,27 @@ object MovieLensFM extends Logging {
   case class Params(
     input: String = null,
     out: String = null,
-    numIterations: Int = 40,
+    confPath: String = null,
     numPartitions: Int = -1,
-    stepSize: Double = 0.1,
-    regular: String = "0.01,0.01,0.01",
-    rank: Int = 20,
     useAdaGrad: Boolean = false,
-    useSVDPlusPlus: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
 
   def main(args: Array[String]) {
     val defaultParams = Params()
     val parser = new OptionParser[Params]("FM") {
       head("MovieLensFM: an example app for FM.")
-      opt[Int]("numIterations")
-        .text(s"number of iterations, default: ${defaultParams.numIterations}")
-        .action((x, c) => c.copy(numIterations = x))
-      opt[Int]("rank")
-        .text(s"dim of 2-way interactions, default: ${defaultParams.rank}")
-        .action((x, c) => c.copy(rank = x))
       opt[Int]("numPartitions")
         .text(s"number of partitions, default: ${defaultParams.numPartitions}")
         .action((x, c) => c.copy(numPartitions = x))
       opt[Unit]("kryo")
         .text("use Kryo serialization")
         .action((_, c) => c.copy(kryo = true))
-      opt[Double]("stepSize")
-        .text(s"stepSize, default: ${defaultParams.stepSize}")
-        .action((x, c) => c.copy(stepSize = x))
-      opt[String]("regular")
-        .text(
-          s"""
-             |'r0,r1,r2' for SGD: r0=bias regularization, r1=1-way regularization,
-             |r2=2-way regularization, default: ${defaultParams.regular} (auto)
-           """.stripMargin)
-        .action((x, c) => c.copy(regular = x))
+      opt[String]("confPath")
+        .text(s"conf file Path, default: ${defaultParams.confPath}")
+        .action((x, c) => c.copy(confPath = x))
       opt[Unit]("adagrad")
         .text("use AdaGrad")
         .action((_, c) => c.copy(useAdaGrad = true))
-      opt[Unit]("svdPlusPlus")
-        .text("use SVD++")
-        .action((_, c) => c.copy(useSVDPlusPlus = true))
       arg[String]("<input>")
         .required()
         .text("input paths")
@@ -85,7 +68,7 @@ object MovieLensFM extends Logging {
           |
           | bin/spark-submit --class com.github.cloudml.zen.examples.ml.MovieLensFM \
           | examples/target/scala-*/zen-examples-*.jar \
-          | --rank 10 --numIterations 50 --regular 0.01,0.01,0.01 --kryo \
+          | --confPath conf/MovieLensFM.txt --kryo \
           | data/mllib/sample_movielens_data.txt
           | data/mllib/fm_model
         """.stripMargin)
@@ -99,11 +82,8 @@ object MovieLensFM extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, regular, rank,
-    useAdaGrad, useSVDPlusPlus, kryo) = params
-    val storageLevel = if (useSVDPlusPlus) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
-    val regs = regular.split(",").map(_.toDouble)
-    val l2 = (regs(0), regs(1), regs(2))
+    val Params(input, out, confPath, numPartitions, useAdaGrad, kryo) = params
+    val storageLevel = StorageLevel.MEMORY_AND_DISK
     val conf = new SparkConf().setAppName(s"FM with $params")
     if (kryo) {
       GraphXUtils.registerKryoClasses(conf)
@@ -113,28 +93,42 @@ object MovieLensFM extends Logging {
     val checkpointDir = s"$out/checkpoint"
     sc.setCheckpointDir(checkpointDir)
     SparkHacker.gcCleaner(60 * 10, 60 * 10, "MovieLensFM")
-    val (trainSet, testSet, _) = if (useSVDPlusPlus) {
-      MovieLensUtils.genSamplesSVDPlusPlus(sc, input, numPartitions, storageLevel)
+    val (trainSet, testSet, validationSet, _) = MovieLensUtils.crossValidation(sc,
+      input, numPartitions, storageLevel)
+    import scala.collection.JavaConversions._
+    val lines = Files.readLines(new java.io.File(confPath), Charset.defaultCharset())
+    lines.filter(l => !l.startsWith("#")).foreach { line =>
+      val arr = line.trim.split("\\s+").filter(_.nonEmpty)
+      val rank = arr(0).toInt
+      val stepSize = arr(1).toDouble
+      val regs = arr(2).split(",").map(_.toDouble)
+      val l2 = (regs(0), regs(1), regs(2))
+      val numIterations = arr(3).toInt
+      val isValidation = if (arr.length > 4) arr(4).toBoolean else true
+      val lfm = new FMRegression(trainSet, stepSize, l2, rank, useAdaGrad, 1.0, storageLevel)
+      var iter = 0
+      var model: FMModel = null
+      while (iter < numIterations) {
+        val thisItr = math.min(50, numIterations - iter)
+        iter += thisItr
+        if (model != null) model.factors.unpersist(false)
+        lfm.run(thisItr)
+        model = lfm.saveModel()
+        model.factors.persist(storageLevel)
+        model.factors.count()
+        val pout = s"rank=$rank stepSize=$stepSize l2=$l2"
+        if (isValidation) {
+          val rmse = model.loss(validationSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Validation RMSE:                     $rmse%1.4f")
+          println(f"(Iteration $iter/$numIterations $pout) Validation RMSE:                     $rmse%1.4f")
+        } else {
+          val rmse = model.loss(testSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Test RMSE:                     $rmse%1.4f")
+          println(f"(Iteration $iter/$numIterations $pout) Test RMSE:                     $rmse%1.4f")
+        }
+      }
+      // model.save(sc, out)
     }
-    else {
-      MovieLensUtils.genSamplesWithTime(sc, input, numPartitions, storageLevel)
-    }
-    val lfm = new FMRegression(trainSet, stepSize, l2, rank, useAdaGrad, 1.0, storageLevel)
-    var iter = 0
-    var model: FMModel = null
-    while (iter < numIterations) {
-      val thisItr = math.min(50, numIterations - iter)
-      iter += thisItr
-      if (model != null) model.factors.unpersist(false)
-      lfm.run(thisItr)
-      model = lfm.saveModel()
-      model.factors.persist(storageLevel)
-      model.factors.count()
-      val rmse = model.loss(testSet)
-      logInfo(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.4f")
-      println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.4f")
-    }
-    model.save(sc, out)
     sc.stop()
   }
 }

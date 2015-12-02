@@ -1,0 +1,3 @@
+# stepSize regular numIterations (validation or test optional)
+0.05 0.01 400
+0.05 0.01 400 true

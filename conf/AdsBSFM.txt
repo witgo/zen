@@ -1,0 +1,3 @@
+# rank stepSize regular numIterations (validation or test optional)
+20 0.05 0.01,0.01,0.01 400
+20 0.05 0.01,0.01,0.01 400 true

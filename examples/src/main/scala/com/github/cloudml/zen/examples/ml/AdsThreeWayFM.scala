@@ -16,9 +16,12 @@
  */
 package com.github.cloudml.zen.examples.ml
 
+import java.nio.charset.Charset
+
 import breeze.linalg.{SparseVector => BSV}
 import com.github.cloudml.zen.ml.recommendation.{ThreeWayFMModel, ThreeWayFMClassification, ThreeWayFM}
 import com.github.cloudml.zen.ml.util.SparkHacker
+import com.google.common.io.Files
 import org.apache.spark.graphx.GraphXUtils
 import org.apache.spark.mllib.linalg.{SparseVector => SSV}
 import org.apache.spark.storage.StorageLevel
@@ -30,13 +33,9 @@ object AdsThreeWayFM extends Logging {
   case class Params(
     input: String = null,
     out: String = null,
-    numIterations: Int = 40,
+    confPath: String = null,
     numPartitions: Int = -1,
-    stepSize: Double = 0.1,
     fraction: Double = 1.0,
-    regular: String = "0.01,0.01,0.01,0.01",
-    rank2: Int = 10,
-    rank3: Int = 10,
     useAdaGrad: Boolean = false,
     useWeightedLambda: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
@@ -45,18 +44,9 @@ object AdsThreeWayFM extends Logging {
     val defaultParams = Params()
     val parser = new OptionParser[Params]("AdsThreeWayFM") {
       head("AdsThreeWayFM: an example app for ThreeWayFM.")
-      opt[Int]("numIterations")
-        .text(s"number of iterations, default: ${defaultParams.numIterations}")
-        .action((x, c) => c.copy(numIterations = x))
       opt[Int]("numPartitions")
         .text(s"number of partitions, default: ${defaultParams.numPartitions}")
         .action((x, c) => c.copy(numPartitions = x))
-      opt[Int]("rank2")
-        .text(s"dim of 2-way interactions, default: ${defaultParams.rank2}")
-        .action((x, c) => c.copy(rank2 = x))
-      opt[Int]("rank3")
-        .text(s"dim of 3-way interactions, default: ${defaultParams.rank2}")
-        .action((x, c) => c.copy(rank3 = x))
       opt[Unit]("kryo")
         .text("use Kryo serialization")
         .action((_, c) => c.copy(kryo = true))
@@ -64,16 +54,6 @@ object AdsThreeWayFM extends Logging {
         .text(
           s"the sampling fraction, default: ${defaultParams.fraction}")
         .action((x, c) => c.copy(fraction = x))
-      opt[Double]("stepSize")
-        .text(s"stepSize, default: ${defaultParams.stepSize}")
-        .action((x, c) => c.copy(stepSize = x))
-      opt[String]("regular")
-        .text(
-          s"""
-             |'r0,r1,r2,r3' for SGD: r0=bias regularization, r1=1-way regularization, r2=2-way regularization,
-             |r2=3-way regularization default: ${defaultParams.regular} (auto)
-           """.stripMargin)
-        .action((x, c) => c.copy(regular = x))
       opt[Unit]("adagrad")
         .text("use AdaGrad")
         .action((_, c) => c.copy(useAdaGrad = true))
@@ -94,9 +74,9 @@ object AdsThreeWayFM extends Logging {
           |
           | bin/spark-submit --class com.github.cloudml.zen.examples.ml.AdsThreeWayFM \
           | examples/target/scala-*/zen-examples-*.jar \
-          | --rank2 10 --rank3 10  --numIterations 50 --regular 0.01,0.01,0.01,0.01 --kryo \
+          |  --confPath conf/AdsThreeWayFM.txt --kryo \
           | data/mllib/sample_movielens_data.txt
-          | data/mllib/ThreeWayFM_model
+          | data/mllib/AdsThreeWayFM_model
         """.stripMargin)
     }
 
@@ -108,11 +88,8 @@ object AdsThreeWayFM extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, fraction, regular,
-    rank2, rank3, useAdaGrad, useWeightedLambda, kryo) = params
+    val Params(input, out, confPath, numPartitions, fraction, useAdaGrad, useWeightedLambda, kryo) = params
     val storageLevel = StorageLevel.MEMORY_AND_DISK
-    val regs = regular.split(",").map(_.toDouble)
-    val l2 = (regs(0), regs(1), regs(2), regs(3))
     val conf = new SparkConf().setAppName(s"ThreeWayFM with $params")
     if (kryo) {
       GraphXUtils.registerKryoClasses(conf)
@@ -122,26 +99,44 @@ object AdsThreeWayFM extends Logging {
     val checkpointDir = s"$out/checkpoint"
     sc.setCheckpointDir(checkpointDir)
     SparkHacker.gcCleaner(60 * 10, 60 * 10, "AdsThreeWayFM")
-    val (trainSet, testSet, views) = AdsUtils.genSamplesWithTimeAnd3Views(sc, input,
-      numPartitions, fraction, storageLevel)
-
-    val lfm = new ThreeWayFMClassification(trainSet, stepSize, views, l2, rank2, rank3,
-      useAdaGrad, useWeightedLambda, 1.0, storageLevel)
-    var iter = 0
-    var model: ThreeWayFMModel = null
-    while (iter < numIterations) {
-      val thisItr = math.min(50, numIterations - iter)
-      iter += thisItr
-      if (model != null) model.factors.unpersist(false)
-      lfm.run(thisItr)
-      model = lfm.saveModel()
-      model.factors.persist(storageLevel)
-      model.factors.count()
-      val auc = model.loss(testSet)
-      logInfo(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
-      println(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
+    val (trainSet, testSet, validationSet, views) = AdsUtils.crossValidation(sc, input, numPartitions,
+      fraction, storageLevel)
+    import scala.collection.JavaConversions._
+    val lines = Files.readLines(new java.io.File(confPath), Charset.defaultCharset())
+    lines.filter(l => !l.startsWith("#")).foreach { line =>
+      val arr = line.trim.split("\\s+").filter(_.nonEmpty)
+      val rank2 = arr(0).toInt
+      val rank3 = arr(1).toInt
+      val stepSize = arr(2).toDouble
+      val regs = arr(3).split(",").map(_.toDouble)
+      val l2 = (regs(0), regs(1), regs(2), regs(3))
+      val numIterations = arr(4).toInt
+      val isValidation = if (arr.length > 5) arr(5).toBoolean else true
+      val lfm = new ThreeWayFMClassification(trainSet, stepSize, views, l2, rank2, rank3,
+        useAdaGrad, useWeightedLambda, 1.0, storageLevel)
+      var iter = 0
+      var model: ThreeWayFMModel = null
+      while (iter < numIterations) {
+        val thisItr = math.min(50, numIterations - iter)
+        iter += thisItr
+        if (model != null) model.factors.unpersist(false)
+        lfm.run(thisItr)
+        model = lfm.saveModel()
+        model.factors.persist(storageLevel)
+        model.factors.count()
+        val pout = s"rank2=$rank2 rank3=$rank3 stepSize=$stepSize l2=$l2"
+        if (isValidation) {
+          val auc = model.loss(validationSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+        } else {
+          val auc = model.loss(testSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+        }
+      }
+      // model.save(sc, out)
     }
-    model.save(sc, out)
     sc.stop()
   }
 }

@@ -16,9 +16,12 @@
  */
 package com.github.cloudml.zen.examples.ml
 
+import java.nio.charset.Charset
+
 import breeze.linalg.{SparseVector => BSV}
 import com.github.cloudml.zen.ml.recommendation._
 import com.github.cloudml.zen.ml.util.SparkHacker
+import com.google.common.io.Files
 import org.apache.spark.graphx.GraphXUtils
 import org.apache.spark.mllib.linalg.{SparseVector => SSV}
 import org.apache.spark.mllib.regression.LabeledPoint
@@ -31,14 +34,10 @@ object AdsFM extends Logging {
   case class Params(
     input: String = null,
     out: String = null,
-    numIterations: Int = 200,
+    confPath: String = null,
     numPartitions: Int = -1,
-    stepSize: Double = 0.05,
-    regular: String = "0.01,0.01,0.01",
     fraction: Double = 1.0,
-    rank: Int = 64,
     useAdaGrad: Boolean = false,
-    useThreeViews: Boolean = false,
     diskOnly: Boolean = false,
     kryo: Boolean = false) extends AbstractParams[Params]
 
@@ -46,31 +45,14 @@ object AdsFM extends Logging {
     val defaultParams = Params()
     val parser = new OptionParser[Params]("FM") {
       head("AdsFM: an example app for FM.")
-      opt[Int]("numIterations")
-        .text(s"number of iterations, default: ${defaultParams.numIterations}")
-        .action((x, c) => c.copy(numIterations = x))
       opt[Int]("numPartitions")
         .text(s"number of partitions, default: ${defaultParams.numPartitions}")
         .action((x, c) => c.copy(numPartitions = x))
-      opt[Int]("rank")
-        .text(s"dim of 2-way interactions, default: ${defaultParams.rank}")
-        .action((x, c) => c.copy(rank = x))
       opt[Unit]("kryo")
         .text("use Kryo serialization")
         .action((_, c) => c.copy(kryo = true))
-      opt[Double]("stepSize")
-        .text(s"stepSize, default: ${defaultParams.stepSize}")
-        .action((x, c) => c.copy(stepSize = x))
-      opt[String]("regular")
-        .text(
-          s"""
-             |'r0,r1,r2' for SGD: r0=bias regularization, r1=1-way regularization,
-             |r2=2-way regularization, default: ${defaultParams.regular} (auto)
-           """.stripMargin)
-        .action((x, c) => c.copy(regular = x))
       opt[Double]("fraction")
-        .text(
-          s"the sampling fraction, default: ${defaultParams.fraction}")
+        .text(s"the sampling fraction, default: ${defaultParams.fraction}")
         .action((x, c) => c.copy(fraction = x))
       opt[Unit]("diskOnly")
         .text("use DISK_ONLY storage levels")
@@ -78,9 +60,6 @@ object AdsFM extends Logging {
       opt[Unit]("adagrad")
         .text("use AdaGrad")
         .action((_, c) => c.copy(useAdaGrad = true))
-      opt[Unit]("threeViews")
-        .text("use three views")
-        .action((_, c) => c.copy(useThreeViews = true))
       arg[String]("<input>")
         .required()
         .text("input paths")
@@ -95,9 +74,9 @@ object AdsFM extends Logging {
           |
           | bin/spark-submit --class com.github.cloudml.zen.examples.ml.AdsFM \
           |  examples/target/scala-*/zen-examples-*.jar \
-          |  --rank 20 --numIterations 200 --regular 0.01 --kryo \
+          |  --confPath conf/AdsFM.txt  --kryo \
           |  data/mllib/ads_data/*
-          |  data/mllib/FM_model
+          |  data/mllib/AdsFM_model
         """.stripMargin)
     }
 
@@ -109,11 +88,9 @@ object AdsFM extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, regular, fraction,
-    rank, useAdaGrad, useThreeViews, diskOnly, kryo) = params
+    val Params(input, out, confPath, numPartitions, fraction, useAdaGrad, diskOnly, kryo) = params
     val storageLevel = if (diskOnly) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
-    val regs = regular.split(",").map(_.toDouble)
-    val l2 = (regs(0), regs(1), regs(2))
+
     val checkpointDir = s"$out/checkpoint"
     val conf = new SparkConf().setAppName(s"FM with $params")
     if (kryo) {
@@ -123,28 +100,42 @@ object AdsFM extends Logging {
     val sc = new SparkContext(conf)
     sc.setCheckpointDir(checkpointDir)
     SparkHacker.gcCleaner(60 * 15, 60 * 15, "AdsFM")
-    val (trainSet, testSet, _) = if (useThreeViews) {
-      AdsUtils.genSamplesWithTimeAnd3Views(sc, input, numPartitions, fraction, storageLevel)
-    } else {
-      AdsUtils.genSamplesWithTime(sc, input, numPartitions, fraction, storageLevel)
+    val (trainSet, testSet, validationSet, views) = AdsUtils.crossValidation(sc, input, numPartitions,
+      fraction, storageLevel)
+    import scala.collection.JavaConversions._
+    val lines = Files.readLines(new java.io.File(confPath), Charset.defaultCharset())
+    lines.filter(l => !l.startsWith("#")).foreach { line =>
+      val arr = line.trim.split("\\s+").filter(_.nonEmpty)
+      val rank = arr(0).toInt
+      val stepSize = arr(1).toDouble
+      val regs = arr(2).split(",").map(_.toDouble)
+      val l2 = (regs(0), regs(1), regs(2))
+      val numIterations = arr(3).toInt
+      val isValidation = if (arr.length > 4) arr(4).toBoolean else true
+      val lfm = new FMClassification(trainSet, stepSize, l2, rank, useAdaGrad, 1.0, storageLevel)
+      var iter = 0
+      var model: FMModel = null
+      while (iter < numIterations) {
+        val thisItr = math.min(50, numIterations - iter)
+        iter += thisItr
+        if (model != null) model.factors.unpersist(false)
+        lfm.run(thisItr)
+        model = lfm.saveModel()
+        model.factors.persist(storageLevel)
+        model.factors.count()
+        val pout = s"rank=$rank stepSize=$stepSize l2=$l2"
+        if (isValidation) {
+          val auc = model.loss(validationSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+        } else {
+          val auc = model.loss(testSet)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+        }
+      }
+      // model.save(sc, out)
     }
-
-    val lfm = new FMClassification(trainSet, stepSize, l2, rank, useAdaGrad, 1.0, storageLevel)
-    var iter = 0
-    var model: FMModel = null
-    while (iter < numIterations) {
-      val thisItr = math.min(50, numIterations - iter)
-      iter += thisItr
-      if (model != null) model.factors.unpersist(false)
-      lfm.run(thisItr)
-      model = lfm.saveModel()
-      model.factors.persist(storageLevel)
-      model.factors.count()
-      val auc = model.loss(testSet)
-      logInfo(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
-      println(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
-    }
-    model.save(sc, out)
     sc.stop()
   }
 

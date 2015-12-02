@@ -16,10 +16,13 @@
  */
 package com.github.cloudml.zen.examples.ml
 
+import java.nio.charset.Charset
+
 import breeze.linalg.{SparseVector => BSV}
 import com.github.cloudml.zen.ml.recommendation._
 import com.github.cloudml.zen.ml.regression.{LogisticRegressionSGD, LogisticRegression}
 import com.github.cloudml.zen.ml.util.SparkHacker
+import com.google.common.io.Files
 import org.apache.spark.graphx.GraphXUtils
 import org.apache.spark.mllib.classification.LogisticRegressionModel
 import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
@@ -34,13 +37,10 @@ object AdsLR extends Logging {
   case class Params(
     input: String = null,
     out: String = null,
-    numIterations: Int = 200,
+    confPath: String = null,
     numPartitions: Int = -1,
-    stepSize: Double = 0.05,
-    regular: Double = 0.01,
     fraction: Double = 1.0,
     useAdaGrad: Boolean = false,
-    useThreeViews: Boolean = false,
     diskOnly: Boolean = false,
     kryo: Boolean = false) extends AbstractParams[Params]
 
@@ -48,22 +48,13 @@ object AdsLR extends Logging {
     val defaultParams = Params()
     val parser = new OptionParser[Params]("LR") {
       head("AdsLR: an example app for LR.")
-      opt[Int]("numIterations")
-        .text(s"number of iterations, default: ${defaultParams.numIterations}")
-        .action((x, c) => c.copy(numIterations = x))
+
       opt[Int]("numPartitions")
         .text(s"number of partitions, default: ${defaultParams.numPartitions}")
         .action((x, c) => c.copy(numPartitions = x))
       opt[Unit]("kryo")
         .text("use Kryo serialization")
         .action((_, c) => c.copy(kryo = true))
-      opt[Double]("stepSize")
-        .text(s"stepSize, default: ${defaultParams.stepSize}")
-        .action((x, c) => c.copy(stepSize = x))
-      opt[Double]("regular")
-        .text(
-          s"L2 regularization, default: ${defaultParams.regular}")
-        .action((x, c) => c.copy(regular = x))
       opt[Double]("fraction")
         .text(
           s"the sampling fraction, default: ${defaultParams.fraction}")
@@ -74,9 +65,6 @@ object AdsLR extends Logging {
       opt[Unit]("diskOnly")
         .text("use DISK_ONLY storage levels")
         .action((_, c) => c.copy(diskOnly = true))
-      opt[Unit]("threeViews")
-        .text("use three views")
-        .action((_, c) => c.copy(useThreeViews = true))
       arg[String]("<input>")
         .required()
         .text("input paths")
@@ -91,9 +79,9 @@ object AdsLR extends Logging {
           |
           | bin/spark-submit --class com.github.cloudml.zen.examples.ml.AdsLR \
           |  examples/target/scala-*/zen-examples-*.jar \
-          |  --numIterations 200 --regular 0.01 --kryo \
+          |  --confPath conf/AdsLR.txt --kryo \
           |  data/mllib/ads_data/*
-          |  data/mllib/MVM_model
+          |  data/mllib/AdsLR_model
         """.stripMargin)
     }
 
@@ -105,8 +93,8 @@ object AdsLR extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, regular, fraction,
-    useAdaGrad, useThreeViews, diskOnly, kryo) = params
+    val Params(input, out, confPath, numPartitions, fraction,
+    useAdaGrad, diskOnly, kryo) = params
 
     val storageLevel = if (diskOnly) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
     val checkpointDir = s"$out/checkpoint"
@@ -118,34 +106,57 @@ object AdsLR extends Logging {
     val sc = new SparkContext(conf)
     sc.setCheckpointDir(checkpointDir)
     SparkHacker.gcCleaner(60 * 15, 60 * 15, "AdsLR")
-    val (trainSet, testSet, views) = if (useThreeViews) {
-      AdsUtils.genSamplesWithTimeAnd3Views(sc, input, numPartitions, fraction, storageLevel)
-    } else {
-      AdsUtils.genSamplesWithTime(sc, input, numPartitions, fraction, storageLevel)
-    }
+    val (trainSet, testSet, validationSet, views) = AdsUtils.crossValidation(sc, input, numPartitions,
+      fraction, storageLevel)
 
     val numFeatures = views.last.toInt
-    val lr = new LogisticRegressionSGD(trainSet, stepSize, regular, useAdaGrad, storageLevel)
-    var iter = 0
-    var model: LogisticRegressionModel = null
-    while (iter < numIterations) {
-      val thisItr = math.min(50, numIterations - iter)
-      iter += thisItr
-      lr.run(thisItr)
-      model = lr.saveModel(numFeatures).asInstanceOf[LogisticRegressionModel]
-      model.clearThreshold()
-      val scoreAndLabels = testSet.map { case (_, LabeledPoint(label, features)) =>
-        (model.predict(features), label)
+    import scala.collection.JavaConversions._
+    val lines = Files.readLines(new java.io.File(confPath), Charset.defaultCharset())
+    lines.filter(l => !l.startsWith("#")).foreach { line =>
+      val arr = line.trim.split("\\s+").filter(_.nonEmpty)
+      val stepSize = arr(0).toDouble
+      val regParam = arr(1).toDouble
+      val numIterations = arr(2).toInt
+      val isValidation = if (arr.length > 3) arr(3).toBoolean else true
+
+      val lr = new LogisticRegressionSGD(trainSet, stepSize, regParam, useAdaGrad, storageLevel)
+      var iter = 0
+      var model: LogisticRegressionModel = null
+      while (iter < numIterations) {
+        val thisItr = math.min(50, numIterations - iter)
+        iter += thisItr
+        lr.run(thisItr)
+        model = lr.saveModel(numFeatures).asInstanceOf[LogisticRegressionModel]
+        model.clearThreshold()
+
+        val pout = s"stepSize=$stepSize regParam=$regParam"
+        if (isValidation) {
+          val scoreAndLabels = validationSet.map { case (_, LabeledPoint(label, features)) =>
+            (model.predict(features), label)
+          }
+          scoreAndLabels.persist(storageLevel)
+          scoreAndLabels.count()
+          val metrics = new BinaryClassificationMetrics(scoreAndLabels)
+          val auc = metrics.areaUnderROC()
+          scoreAndLabels.unpersist(false)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Validation AUC:                     $auc%1.6f")
+        } else {
+          val scoreAndLabels = testSet.map { case (_, LabeledPoint(label, features)) =>
+            (model.predict(features), label)
+          }
+          scoreAndLabels.persist(storageLevel)
+          scoreAndLabels.count()
+          val metrics = new BinaryClassificationMetrics(scoreAndLabels)
+          val auc = metrics.areaUnderROC()
+          scoreAndLabels.unpersist(false)
+          logInfo(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+          println(f"(Iteration $iter/$numIterations $pout) Test AUC:                     $auc%1.6f")
+        }
+
       }
-      scoreAndLabels.persist(storageLevel)
-      scoreAndLabels.count()
-      val metrics = new BinaryClassificationMetrics(scoreAndLabels)
-      val auc = metrics.areaUnderROC()
-      scoreAndLabels.unpersist(false)
-      logInfo(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
-      println(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
+      // model.save(sc, out)
     }
-    model.save(sc, out)
     sc.stop()
   }
 }
