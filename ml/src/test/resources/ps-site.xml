@@ -21,9 +21,12 @@
  */
 -->
 <configuration>
-  <ps>
-    <master>
-      <rpc-address>localhost:10010</rpc-address>
-    </master>
-  </ps>
+  <property>
+    <name>ps.master.rpc-address</name>
+    <value>witgo-pro:10010</value>
+    <description>
+      RPC address that handles all clients requests.
+      The value of this property will take the form of master-host:rpc-port.
+    </description>
+  </property>
 </configuration>
