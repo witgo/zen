@@ -59,7 +59,6 @@ private[ml] trait Layer extends Serializable {
 
   def outputError(output: BDM[Double], label: BDM[Double]): BDM[Double] = {
     val delta: BDM[Double] = output - label
-
     computeNeuronPrimitive(delta, output)
     delta
   }
@@ -116,7 +115,7 @@ private[ml] class SigmoidLayer(
     output: BDM[Double]): Unit = {
     for (i <- 0 until temp.rows) {
       for (j <- 0 until temp.cols) {
-        temp(i, j) = temp(i, j) * sigmoidPrimitive(output(i, j))
+        temp(i, j) *= sigmoidPrimitive(output(i, j))
       }
     }
   }
@@ -150,7 +149,7 @@ private[ml] class TanhLayer(
     output: BDM[Double]): Unit = {
     for (i <- 0 until temp.rows) {
       for (y <- 0 until temp.cols) {
-        temp(i, y) = temp(i, y) * tanhPrimitive(output(i, y))
+        temp(i, y) *= tanhPrimitive(output(i, y))
       }
     }
   }
@@ -302,6 +301,56 @@ private[ml] class ReLuLayer(
   }
 }
 
+/**
+  * Fast and Accurate Deep Network Learning by Exponential Linear Units (ELUs)
+  * The paper: http://arxiv.org/abs/1511.07289
+  * @param weight
+  * @param bias
+  */
+private[ml] class ELuLayer(
+  val weight: BDM[Double],
+  val bias: BDV[Double]) extends Layer with Logging {
+
+  def alpha: Double = 1D
+
+  def this(numIn: Int, numOut: Int) {
+    this(initUniformDistWeight(numIn, numOut, 0.0, 0.01),
+      initializeBias(numOut))
+  }
+
+  override def layerType: String = "ELu"
+
+  private def elu(tmp: BDM[Double]): Unit = {
+    for (i <- 0 until tmp.rows) {
+      for (j <- 0 until tmp.cols) {
+        val s = tmp(i, j)
+        tmp(i, j) = if (s > 0D) s else alpha * (math.exp(s) - 1D)
+      }
+    }
+  }
+
+  override def computeNeuron(temp: BDM[Double]): Unit = {
+    elu(temp)
+  }
+
+  override def computeNeuronPrimitive(temp: BDM[Double], output: BDM[Double]): Unit = {
+    for (i <- 0 until temp.rows) {
+      for (j <- 0 until temp.cols)
+        if (output(i, j) < 0) {
+          temp(i, j) *= output(i, j) + alpha
+        }
+    }
+  }
+
+  override protected[ml] def sample(input: BDM[Double]): BDM[Double] = {
+    input.map { v =>
+      val sd = sigmoid(v, 32)
+      val x = v + sd * rand.nextGaussian()
+      math.max(0, x)
+    }
+  }
+}
+
 private[ml] class SoftPlusLayer(
   val weight: BDM[Double],
   val bias: BDV[Double]) extends Layer with Logging {
@@ -377,6 +426,8 @@ private[ml] object Layer {
         new SigmoidLayer(weight, bias)
       case "Identity" =>
         new IdentityLayer(weight, bias)
+      case "ELu" =>
+        new ELuLayer(weight, bias)
       case _ =>
         throw new IllegalArgumentException("layerType is not correct")
     }

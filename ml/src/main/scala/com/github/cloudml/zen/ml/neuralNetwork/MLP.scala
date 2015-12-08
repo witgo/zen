@@ -250,8 +250,8 @@ object MLP extends Logging with Loader[MLPModel] {
       val numOut = topology(layer + 1)
       layers(layer) = if (layer == numLayer - 1) {
         new SoftMaxLayer(numIn, numOut)
-      }
-      else {
+      } else {
+        // new ELuLayer(numIn, numOut)
         new ReLuLayer(numIn, numOut)
       }
       println(s"layers($layer) = $numIn * $numOut")

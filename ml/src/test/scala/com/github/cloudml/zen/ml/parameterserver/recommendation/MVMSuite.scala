@@ -66,14 +66,14 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.1
+    val stepSize = 0.05
     val numIterations = 10000
-    val regParam = 0.1
+    val regParam = 0.12
     val rank = 32
     val useAdaGrad = true
     val miniBatch = 100
 
-    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad, 1D)
+    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad, 1)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
