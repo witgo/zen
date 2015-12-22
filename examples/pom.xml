@@ -50,6 +50,11 @@
       <artifactId>scopt_${scala.binary.version}</artifactId>
       <version>3.2.0</version>
     </dependency>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>14.0.1</version>
+    </dependency>
     <!-- test -->
     <dependency>
       <groupId>junit</groupId>
@@ -99,7 +104,7 @@
               <exclude>javax.*:*</exclude>
               <exclude>org.objectweb.*:*</exclude>
               <exclude>org.apache.zookeeper:*</exclude>
-              <exclude>com.google.guava:*</exclude>
+              <!--<exclude>com.google.guava:*</exclude>-->
               <exclude>com.twitter:*:*</exclude>
               <exclude>org.mockito:*:*</exclude>
               <exclude>*:commons-beanutils</exclude>
@@ -125,12 +130,12 @@
             </excludes>
           </artifactSet>
           <filters>
-            <filter>
-              <artifact>com.google.guava:guava</artifact>
-              <excludes>
-                <exclude>com/google/common/base/Optional*</exclude>
-              </excludes>
-            </filter>
+            <!--<filter>-->
+              <!--<artifact>com.google.guava:guava</artifact>-->
+              <!--<excludes>-->
+                <!--<exclude>com/google/common/base/Optional*</exclude>-->
+              <!--</excludes>-->
+            <!--</filter>-->
             <filter>
               <artifact>*:*</artifact>
               <excludes>
