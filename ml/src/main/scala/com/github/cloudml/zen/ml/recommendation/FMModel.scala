@@ -38,7 +38,9 @@ class FMModel(
   val k: Int,
   val intercept: ED,
   val classification: Boolean,
-  val factors: RDD[(Long, VD)]) extends Serializable with Saveable {
+  val factors: RDD[(Long, VD)],
+  val maxTarget: Double = Double.MaxValue,
+  val minTarget: Double = Double.MinValue) extends Serializable with Saveable {
   def predict(data: RDD[(Long, SV)]): RDD[(Long, ED)] = {
     data.flatMap { case (sampleId, features) =>
       features.activeIterator.filter(_._2 != 0.0).map {
@@ -57,15 +59,12 @@ class FMModel(
   }
 
   def loss(data: RDD[(Long, LabeledPoint)]): Double = {
-    // val minTarget = data.map(_._2.label).min()
-    // val maxTarget = data.map(_._2.label).max()
     val perd = predict(data.map(t => (t._1, t._2.features)))
     val label = data.map(t => (t._1, t._2.label))
     val scoreAndLabels = label.join(perd).map { case (_, (label, score)) =>
-      // var r = Math.max(score, minTarget)
-      // r = Math.min(r, maxTarget)
-      // pow(l - r, 2)
-      (score, label)
+      var r = Math.max(score, minTarget)
+      r = Math.min(r, maxTarget)
+      (r, label)
     }
     scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
     val ret = if (classification) auc(scoreAndLabels) else rmse(scoreAndLabels)
@@ -84,7 +83,7 @@ class FMModel(
   }
 
   override def save(sc: SparkContext, path: String): Unit = {
-    FMModel.SaveLoadV1_0.save(sc, path, k, intercept, classification, factors)
+    FMModel.SaveLoadV1_0.save(sc, path, k, intercept, classification, factors, maxTarget, minTarget)
   }
 
   override protected def formatVersion: String = FMModel.SaveLoadV1_0.formatVersionV1_0
@@ -101,6 +100,8 @@ object FMModel extends Loader[FMModel] {
       val classification = (metadata \ "classification").extract[Boolean]
       val intercept = (metadata \ "intercept").extract[Double]
       val k = (metadata \ "k").extract[Int]
+      val maxTarget = (metadata \ "maxTarget").extract[Double]
+      val minTarget = (metadata \ "minTarget").extract[Double]
       val dataPath = LoaderUtils.dataPath(path)
       val sqlContext = new SQLContext(sc)
       val dataRDD = sqlContext.read.parquet(dataPath)
@@ -112,7 +113,7 @@ object FMModel extends Loader[FMModel] {
         case Row(featureId: Long, factors: Seq[Double]) =>
           (featureId, factors.toArray)
       }
-      new FMModel(k, intercept, classification, factors)
+      new FMModel(k, intercept, classification, factors, maxTarget, minTarget)
     } else {
       throw new Exception(
         s"FMModel.load did not recognize model with (className, format version):" +
@@ -132,10 +133,13 @@ object FMModel extends Loader[FMModel] {
       k: Int,
       intercept: Double,
       classification: Boolean,
-      factors: RDD[(Long, Array[Double])]): Unit = {
+      factors: RDD[(Long, Array[Double])],
+      maxTarget: Double,
+      minTarget: Double): Unit = {
       val metadata = compact(render
-        (("class" -> classNameV1_0) ~ ("version" -> formatVersionV1_0) ~
-          ("k" -> k) ~ ("intercept" -> intercept) ~ ("classification" -> classification)))
+      (("class" -> classNameV1_0) ~ ("version" -> formatVersionV1_0) ~ ("maxTarget" -> maxTarget) ~
+        ("minTarget" -> minTarget) ~ ("k" -> k) ~ ("intercept" -> intercept) ~
+        ("classification" -> classification)))
       sc.parallelize(Seq(metadata), 1).saveAsTextFile(LoaderUtils.metadataPath(path))
 
       val sqlContext = new SQLContext(sc)
