@@ -33,7 +33,7 @@ trait SharedSparkContext extends BeforeAndAfterAll {
     val conf = new SparkConf().setAppName(s"zen-test")
     conf.set("spark.cleaner.referenceTracking.blocking", "true")
     conf.set("spark.cleaner.referenceTracking.blocking.shuffle", "true")
-    _sc = new SparkContext("local[2]", "test", conf)
+    _sc = new SparkContext("local[4]", "test", conf)
     super.beforeAll()
   }
 

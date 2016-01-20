@@ -186,7 +186,7 @@ private[ml] abstract class FM(
       }.reduce(reduceInterval)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       val loss = lossSum(costSum.head, costSum.last.toLong)
-      logInfo(s"(Iteration $epoch/$iterations) loss:                     $loss")
+      println(s"(Iteration $epoch/$iterations) loss:                     $loss")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
     }

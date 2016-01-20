@@ -149,6 +149,8 @@ private[ml] abstract class MVM(
         val psClient = new PSClient(new PSConf(true))
         val reader = new MatrixReader(psClient, weightName)
         val rand = new XORShiftRandom(innerEpoch * pSize + pid)
+        var mSum = 0D
+        var numSum = 0
         // val regRand = new GammaDistribution(new Well19937c(rand.nextLong()), alpha, beta)
         // val regDist = regRand.sample(viewSize * rank)
         var innerIter = 0
@@ -168,11 +170,18 @@ private[ml] abstract class MVM(
             val arr = forwardSample(indices, values, f2i, features)
             val (multi, loss) = multiplier(arr, sample.label)
             costSum += loss
-            backwardSample(indices, values, multi, f2i, features, grad)
+            mSum += backwardSample(indices, values, multi, f2i, features, grad)
+            numSum += 1
           }
 
           reader.clear()
-          grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
+          grad.foreach { g =>
+            g.indices.foreach { i =>
+              val mAvg = if (i < rank) mSum / numSum else 1D
+              g(i) = mAvg * g(i) / sampledSize
+            }
+          }
+
           l2(gammaDist, regDist, rand, featureIds, features, grad)
 
           innerIter += 1
@@ -183,7 +192,7 @@ private[ml] abstract class MVM(
       }.reduce(reduceInterval)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       val loss = lossSum(costSum.head, costSum.last.toLong)
-      logInfo(s"(Iteration $epoch/$iterations) loss:                     $loss")
+      println(s"(Iteration $epoch/$iterations) loss:                     $loss")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
     }
@@ -195,15 +204,21 @@ private[ml] abstract class MVM(
     multi: Array[Double],
     fId2Offset: Map[Int, Int],
     features: Array[VD],
-    grad: Array[VD]): Unit = {
+    grad: Array[VD]): Double = {
+    val thisGrad = new Array[VD](grad.length)
+    val rankIndices = 0 until rank
+    var m = 0D
     var i = 0
     while (i < indices.length) {
       val featureId = indices(i)
       val value = values(i)
       val fo = fId2Offset(featureId)
       val viewId = featureId2viewId(featureId, views)
-      if (grad(fo) == null) grad(fo) = new Array[Double](rank + 1)
-      backward(rank, viewId, value, multi, multi.last, grad(fo))
+      if (thisGrad(fo) == null) thisGrad(fo) = new Array[Double](rank + 1)
+      val thisFG = new Array[Double](rank + 1)
+      backward(rank, viewId, value, multi, multi.last, thisFG)
+      rankIndices.foreach(v => m += v * v)
+      MVM.reduceInterval(thisGrad(fo), thisFG)
       i += 1
     }
 
@@ -211,9 +226,20 @@ private[ml] abstract class MVM(
       val viewId = featureId2viewId(featureId, views)
       val fo = fId2Offset(featureId)
       val value = 1D
-      if (grad(fo) == null) grad(fo) = new Array[Double](rank + 1)
-      backward(rank, viewId, value, multi, multi.last, grad(fo))
+      if (thisGrad(fo) == null) thisGrad(fo) = new Array[Double](rank + 1)
+      val thisFG = new Array[Double](rank + 1)
+      backward(rank, viewId, value, multi, multi.last, thisFG)
+      rankIndices.foreach(v => m += v * v)
+      MVM.reduceInterval(thisGrad(fo), thisFG)
     }
+    val sm = math.sqrt(m / (indices.length + viewSize))
+    thisGrad.indices.foreach { i =>
+      if (thisGrad(i) != null) {
+        if (grad(i) == null) grad(i) = new Array[Double](rank + 1)
+        MVM.reduceInterval(grad(i), thisGrad(i), 1D / sm)
+      }
+    }
+    sm
   }
 
   private def l2(
@@ -541,6 +567,15 @@ object MVM {
     var i = 0
     while (i < a.length) {
       a(i) += b(i)
+      i += 1
+    }
+    a
+  }
+
+  private[ml] def reduceInterval(a: Array[Double], b: Array[Double], y: Double): Array[Double] = {
+    var i = 0
+    while (i < a.length) {
+      a(i) += y * b(i)
       i += 1
     }
     a

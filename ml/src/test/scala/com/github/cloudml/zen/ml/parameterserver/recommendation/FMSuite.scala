@@ -66,7 +66,7 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
 
-    val stepSize = 0.05
+    val stepSize = 0.03
     val numIterations = 10000
     val regParam = (0.1, 0.12, 0.12)
     val eta = 1E-6
