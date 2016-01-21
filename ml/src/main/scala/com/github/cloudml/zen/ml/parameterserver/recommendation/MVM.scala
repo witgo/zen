@@ -205,8 +205,8 @@ private[ml] abstract class MVM(
     fId2Offset: Map[Int, Int],
     features: Array[VD],
     grad: Array[VD]): Double = {
-    val thisGrad = new Array[VD](grad.length)
     val rankIndices = 0 until rank
+    val thisGrad = new Array[VD](grad.length)
     var m = 0D
     var i = 0
     while (i < indices.length) {
@@ -236,7 +236,10 @@ private[ml] abstract class MVM(
     thisGrad.indices.foreach { i =>
       if (thisGrad(i) != null) {
         if (grad(i) == null) grad(i) = new Array[Double](rank + 1)
-        MVM.reduceInterval(grad(i), thisGrad(i), 1D / sm)
+        rankIndices.foreach { r =>
+          thisGrad(i)(r) /= sm
+        }
+        MVM.reduceInterval(grad(i), thisGrad(i))
       }
     }
     sm
@@ -567,15 +570,6 @@ object MVM {
     var i = 0
     while (i < a.length) {
       a(i) += b(i)
-      i += 1
-    }
-    a
-  }
-
-  private[ml] def reduceInterval(a: Array[Double], b: Array[Double], y: Double): Array[Double] = {
-    var i = 0
-    while (i < a.length) {
-      a(i) += y * b(i)
       i += 1
     }
     a
