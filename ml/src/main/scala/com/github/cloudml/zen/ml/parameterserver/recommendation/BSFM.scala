@@ -22,7 +22,7 @@ import java.util.{Random => JavaRandom, UUID}
 import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import com.github.cloudml.zen.graphx.util.CompletionIterator
-import com.github.cloudml.zen.ml.recommendation.FMModel
+import com.github.cloudml.zen.ml.recommendation.{BSFMModel, FMModel}
 import com.github.cloudml.zen.ml.util.{XORShiftRandom, SparkUtils, Utils}
 import org.apache.commons.math3.distribution.GammaDistribution
 import org.apache.commons.math3.random.{RandomGenerator, Well19937c}
@@ -36,11 +36,11 @@ import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => 
 import org.parameterserver.protocol.{Array => PSArray, DataType, DoubleArray}
 import org.parameterserver.{Configuration => PSConf}
 
-private[ml] abstract class FM(
+private[ml] abstract class BSFM(
   val data: RDD[LabeledPoint],
   val rank: Int) extends Serializable with Logging {
 
-  import FM._
+  import BSFM._
 
   def useAdaGrad: Boolean
 
@@ -51,6 +51,8 @@ private[ml] abstract class FM(
   def batchSize: Int
 
   def samplingFraction: Double = 1D
+
+  def views: Array[Long]
 
   private var innerEpoch: Int = 1
   var storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK
@@ -212,9 +214,10 @@ private[ml] abstract class FM(
       val featureId = indices(i)
       val value = values(i)
       val fo = fId2Offset(featureId)
-      val factors = features(fo)
+      // val factors = features(fo)
+      val viewId = featureId2viewId(featureId, views)
       if (grad(fo) == null) grad(fo) = new Array[Double](rank + 2)
-      backward(rank, value, multi, multi.head, factors, grad(fo))
+      backward(rank, viewId, value, multi, multi.head, grad(fo))
       i += 1
     }
   }
@@ -227,10 +230,10 @@ private[ml] abstract class FM(
     val regDist = regRand.sample(rank + 2)
     alpha = regParam1 * 300D
     regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
-    regDist(1) = regRand.sample()
+    regDist(rank) = regRand.sample()
     alpha = regParam0 * 300D
     regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
-    regDist(0) = regRand.sample()
+    regDist(rank + 1) = regRand.sample()
     regDist
   }
 
@@ -257,7 +260,7 @@ private[ml] abstract class FM(
         // g(offset) += deg * reg * w(offset)
       }
     }
-    gradBias + regDist.head * bias
+    gradBias + regDist.last * bias
   }
 
   private def forwardSample(
@@ -265,14 +268,16 @@ private[ml] abstract class FM(
     values: Array[Double],
     fId2Offset: Map[Int, Int],
     features: Array[VD]): Array[Double] = {
-    val arr = new Array[Double](rank * 2 + 1)
+    val viewSize = values.length
+    val arr = new Array[Double](rank * viewSize + 1)
     var i = 0
     while (i < indices.length) {
       val featureId = indices(i)
       val value = values(i)
       val fo = fId2Offset(featureId)
       val w = features(fo)
-      forward(rank, arr, value, w)
+      val viewId = featureId2viewId(featureId, views)
+      forward(rank, viewSize, viewId, arr, value, w)
       i += 1
     }
     arr
@@ -393,47 +398,48 @@ private[ml] abstract class FM(
     gamma
   }
 
-  def saveModel(): FMModel
+  def saveModel(): BSFMModel
 
   def predict(bias: Double, arr: Array[Double]): Double
 
-  def forward(rank: Int, arr: Array[Double], z: ED, w: VD): Array[Double] = {
-    forwardInterval(rank, arr, z, w)
+  def forward(rank: Int, viewSize: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): Array[Double] = {
+    forwardInterval(rank, viewId, arr, z, w)
   }
 
   def multiplier(bias: Double, arr: Array[Double], label: Double): (Array[Double], Double)
 
   def lossSum(loss: Double, numSamples: Long): Double
 
-  def backward(rank: Int, x: ED, arr: VD, multi: Double, factors: VD, grad: VD): Array[Double] = {
-    backwardInterval(rank, x, arr, multi, factors, grad)
+  def backward(rank: Int, viewId: Int, x: ED, arr: VD, multi: Double, grad: VD): Array[Double] = {
+    backwardInterval(rank, viewId, x, arr, multi, grad)
   }
 
 }
 
-class FMRegression(
+class BSFMRegression(
   @transient override val data: RDD[LabeledPoint],
+  override val views: Array[Long],
   override val rank: Int,
   override val stepSize: Double,
   override val regParam: (Double, Double, Double),
   override val batchSize: Int,
   override val useAdaGrad: Boolean,
   override val samplingFraction: Double = 1D,
-  override val eta: Double = 1E-6) extends FM(data, rank) {
+  override val eta: Double = 1E-6) extends BSFM(data, rank) {
 
-  import FM._
+  import BSFM._
 
   require(samplingFraction > 0 && samplingFraction <= 1,
     s"Sampling fraction ($samplingFraction) must be > 0 and <= 1")
   val max = data.map(_.label).max
   val min = data.map(_.label).min
 
-  override def saveModel(): FMModel = {
-    new FMModel(rank, getBias(), false, features.map(t => (t._1.toLong, t._2)), max, min)
+  override def saveModel(): BSFMModel = {
+    new BSFMModel(rank, getBias(), views, false, features.map(t => (t._1.toLong, t._2)), max, min)
   }
 
   override def predict(bias: Double, arr: Array[Double]): Double = {
-    var result = predictInterval(rank, bias, arr)
+    var result = predictInterval(rank, views.length, bias, arr)
     result = Math.max(result, min)
     result = Math.min(result, max)
     result
@@ -444,7 +450,7 @@ class FMRegression(
   }
 
   override def multiplier(bias: Double, arr: Array[Double], label: Double): (Array[Double], Double) = {
-    val multi = sumInterval(rank, arr)
+    val multi = sumInterval(rank, views.length, arr)
     val sum = predict(bias, arr)
     val diff = sum - label
     multi(0) = diff * 2.0
@@ -452,27 +458,28 @@ class FMRegression(
   }
 }
 
-class FMClassification(
+class BSFMClassification(
   @transient override val data: RDD[LabeledPoint],
+  override val views: Array[Long],
   override val rank: Int,
   override val stepSize: Double,
   override val regParam: (Double, Double, Double),
   override val batchSize: Int,
   override val useAdaGrad: Boolean,
   override val samplingFraction: Double = 1D,
-  override val eta: Double = 1E-6) extends FM(data, rank) {
+  override val eta: Double = 1E-6) extends BSFM(data, rank) {
 
-  import FM._
+  import BSFM._
 
   require(samplingFraction > 0 && samplingFraction <= 1,
     s"Sampling fraction ($samplingFraction) must be > 0 and <= 1")
 
-  override def saveModel(): FMModel = {
-    new FMModel(rank, getBias(), true, features.map(t => (t._1.toLong, t._2)), 1D, 0D)
+  override def saveModel(): BSFMModel = {
+    new BSFMModel(rank, getBias(), views, true, features.map(t => (t._1.toLong, t._2)), 1D, 0D)
   }
 
   override def predict(bias: Double, arr: Array[Double]): Double = {
-    val result = predictInterval(rank, bias, arr)
+    val result = predictInterval(rank, views.length, bias, arr)
     sigmoid(result)
   }
 
@@ -486,19 +493,20 @@ class FMClassification(
 
   override def multiplier(bias: Double, arr: Array[Double], label: Double): (Array[Double], Double) = {
     val z = predict(bias, arr)
-    val multi = sumInterval(rank, arr)
+    val multi = sumInterval(rank, views.length, arr)
     val diff = sigmoid(z) - label
     multi(0) = diff
     (multi, Utils.log1pExp(if (label > 0D) -z else z))
   }
 }
 
-object FM {
+object BSFM {
   private[ml] type ED = Double
   private[ml] type VD = Array[Double]
 
   def trainRegression(
     input: RDD[LabeledPoint],
+    views: Array[Long],
     rank: Int,
     numIterations: Int,
     stepSize: Double,
@@ -506,8 +514,8 @@ object FM {
     miniBatch: Int = 100,
     useAdaGrad: Boolean = false,
     samplingFraction: Double = 1D,
-    eta: Double = 1E-4): FMModel = {
-    val mvm = new FMRegression(input, rank, stepSize, regParam, miniBatch,
+    eta: Double = 1E-4): BSFMModel = {
+    val mvm = new BSFMRegression(input, views, rank, stepSize, regParam, miniBatch,
       useAdaGrad, samplingFraction, eta)
     mvm.run(numIterations)
     mvm.saveModel()
@@ -515,6 +523,7 @@ object FM {
 
   def trainClassification(
     input: RDD[LabeledPoint],
+    views: Array[Long],
     rank: Int,
     numIterations: Int,
     stepSize: Double,
@@ -522,14 +531,34 @@ object FM {
     miniBatch: Int = 100,
     useAdaGrad: Boolean = false,
     samplingFraction: Double = 1D,
-    eta: Double = 1E-4): FMModel = {
+    eta: Double = 1E-4): BSFMModel = {
     val data = input.map { case LabeledPoint(label, features) =>
       LabeledPoint(if (label > 0D) 1D else 0D, features)
     }
-    val mvm = new FMClassification(data, rank, stepSize, regParam, miniBatch,
+    val mvm = new BSFMClassification(data, views, rank, stepSize, regParam, miniBatch,
       useAdaGrad, samplingFraction, eta)
     mvm.run(numIterations)
     mvm.saveModel()
+  }
+
+  private[ml] def featureId2viewId(featureId: Long, views: Array[Long]): Int = {
+    val numFeatures = views.last
+    val viewId = if (featureId >= numFeatures) {
+      featureId - numFeatures
+    } else {
+      val viewSize = views.length
+      var adj = 0
+      var found = false
+      while (adj < viewSize - 1 && !found) {
+        if (featureId < views(adj)) {
+          found = true
+        } else {
+          adj += 1
+        }
+      }
+      adj
+    }
+    viewId.toInt
   }
 
   private[ml] def rowData2Array(rows: Array[RowData]): Array[VD] = {
@@ -562,65 +591,99 @@ object FM {
   }
 
   /**
-    * arr[0] = \sum_{j=1}^{n}w_{j}x_{i}
-    * arr[f] = \sum_{i=1}^{n}v_{i,f}x_{i} f属于 [1,rank]
-    * arr[k] = \sum_{i=1}^{n} v_{i,k}^{2}x_{i}^{2} k属于 (rank,rank * 2 + 1]
+    * arr(k + v * rank) = \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+    * arr(viewSize * rank) = \sum_{i=1}^{n} x_{i}w{i}
     */
-  private[ml] def predictInterval(rank: Int, bias: Double, arr: VD): ED = {
-    var sum = 0D
-    var i = 1
-    while (i <= rank) {
-      sum += math.pow(arr(i), 2) - arr(rank + i)
+  private[ml] def predictInterval(rank: Int, viewSize: Int, bias: Double, arr: VD): ED = {
+    val wx = arr.last
+    var sum2order = 0.0
+    var i = 0
+    while (i < rank) {
+      var allSum = 0.0
+      var viewSumP2 = 0.0
+      var viewId = 0
+      while (viewId < viewSize) {
+        viewSumP2 += math.pow(arr(i + viewId * rank), 2)
+        allSum += arr(i + viewId * rank)
+        viewId += 1
+      }
+      sum2order += math.pow(allSum, 2) - viewSumP2
       i += 1
     }
-    bias + arr(0) + 0.5 * sum
+    bias + wx + 0.5 * sum2order
   }
 
 
   /**
-    * arr[0] = \sum_{j=1}^{n}w_{j}x_{i}
-    * arr[f] = \sum_{i=1}^{n}v_{i,f}x_{i}, f belongs to  [1,rank]
-    * arr[k] = \sum_{i=1}^{n} v_{i,k}^{2}x_{i}^{2}, k belongs to  (rank,rank * 2 + 1]
+    * arr = rank * viewSize + 1
+    * when f belongs to [viewId * rank ,(viewId +1) * rank)
+    * arr[f] = x_{i}v_{i,f}
     */
-  private[ml] def forwardInterval(rank: Int, arr: Array[Double], x: ED, w: VD): VD = {
-    arr(0) += x * w(0)
-    var i = 1
-    while (i <= rank) {
-      arr(i) += x * w(i)
-      arr(rank + i) += math.pow(x, 2) * math.pow(w(i), 2)
+  private[ml] def forwardInterval(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): VD = {
+    arr(arr.length - 1) += z * w(rank)
+    var i = 0
+    while (i < rank) {
+      arr(i + viewId * rank) += z * w(i)
       i += 1
     }
     arr
   }
 
+
   /**
-    * sumM = \sum_{j=1}^{n}v_{j,f}x_{j}
+    * m = rank + 1
+    * when k belongs to [0,rank)
+    * arr(k) = multi \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+    * arr(rank)= multi x
+    * clustering: multi = 1/(1+ \exp(-\hat{y}(x|\Theta)) ) - y
+    * regression: multi = 2(\hat{y}(x|\Theta) -y)
     */
   private[ml] def backwardInterval(
     rank: Int,
+    viewId: Int,
     x: ED,
-    sumM: VD,
+    arr: VD,
     multi: ED,
-    factors: VD,
     m: VD): VD = {
-    m(0) += x * multi
-    var i = 1
-    while (i <= rank) {
-      val grad = sumM(i) * x - factors(i) * math.pow(x, 2)
-      m(i) += grad * multi
+    var i = 0
+    while (i < rank) {
+      m(i) += multi * x * arr(i + viewId * rank)
       i += 1
     }
+    m(rank) = x * multi
     m(m.length - 1) += 1
     m
   }
 
-  private[ml] def sumInterval(rank: Int, arr: Array[Double]): VD = {
-    val result = new Array[Double](rank + 1)
-    var i = 1
-    while (i <= rank) {
-      result(i) = arr(i)
+  /**
+    * arr(k + v * rank)= \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+    * arr(rank * viewSize) = x_l
+    */
+  private[ml] def sumInterval(rank: Int, viewSize: Int, arr: Array[Double]): VD = {
+    val m = new Array[Double](rank)
+    var i = 0
+    while (i < rank) {
+      var multi = 0.0
+      var viewId = 0
+      while (viewId < viewSize) {
+        multi += arr(i + viewId * rank)
+        viewId += 1
+      }
+      m(i) += multi
       i += 1
     }
-    result
+
+    val ret = new Array[Double](rank * viewSize + 2)
+    i = 0
+    while (i < rank) {
+      var viewId = 0
+      while (viewId < viewSize) {
+        ret(i + viewId * rank) = m(i) - arr(i + viewId * rank)
+        viewId += 1
+      }
+      i += 1
+    }
+    ret(rank * viewSize) = arr(rank * viewSize)
+    ret
   }
 }

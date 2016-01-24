@@ -18,7 +18,7 @@
 package com.github.cloudml.zen.ml.parameterserver.recommendation
 
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV, sum => brzSum}
-import com.github.cloudml.zen.ml.recommendation.{FMModel, MVMModel}
+import com.github.cloudml.zen.ml.recommendation.BSFMModel
 import com.github.cloudml.zen.ml.util._
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
@@ -26,7 +26,7 @@ import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
-class FMSuite extends FunSuite with SharedSparkContext with Matchers {
+class BSFMSuite extends FunSuite with SharedSparkContext with Matchers {
   test("movieLens 100k (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
@@ -61,24 +61,20 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
     testSet.count()
     movieLens.unpersist()
 
-    // MLUtils.saveAsLibSVMFile(trainSet.repartition(1), s"$sparkHome/data/ml-1m/trainSet/")
-    // MLUtils.saveAsLibSVMFile(testSet.map(_._2).repartition(1), s"$sparkHome/data/ml-1m/testSet/")
-    // sys.exit(-1)
-
-
-    val stepSize = 0.03
-    val numIterations = 10000
-    val regParam = (0.1, 0.12, 0.12)
+    val views = Array(maxUserId, numFeatures).map(_.toLong)
+    val stepSize = 0.05
+    val numIterations = 1000
+    val regParam = (0.1, 0.1, 0.1)
     val eta = 1E-6
     val samplingFraction = 1D
     val rank = 32
     val useAdaGrad = true
     val miniBatch = 100
 
-    val lfm = new FMRegression(trainSet, rank, stepSize, regParam, miniBatch,
+    val lfm = new BSFMRegression(trainSet, views, rank, stepSize, regParam, miniBatch,
       useAdaGrad, samplingFraction, eta)
     var iter = 0
-    var model: FMModel = null
+    var model: BSFMModel = null
     while (iter < numIterations) {
       val thisItr = if (iter < 10) {
         math.min(5, numIterations - iter)
@@ -92,31 +88,5 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
       val rmse = model.loss(testSet)
       println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
     }
-  }
-
-  ignore("binary classification") {
-    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
-    val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
-    val checkpoint = s"$sparkHome/target/tmp"
-    sc.setCheckpointDir(checkpoint)
-    val dataSet = MLUtils.loadLibSVMFile(sc, dataSetFile).map {
-      case LabeledPoint(label, features) =>
-        val newLabel = if (label > 0.0) 1.0 else 0.0
-        val bsv = SparkUtils.toBreeze(features).asInstanceOf[BSV[Double]]
-        bsv(40) = 0
-        bsv.compact()
-        LabeledPoint(newLabel, SparkUtils.fromBreeze(bsv))
-    }.persist()
-    val numFeatures = dataSet.first().features.size
-    val views = Array(40, numFeatures).map(_.toLong)
-    val stepSize = 0.1
-    val numIterations = 1000
-    val regParam = 0
-    val rank = 4
-    val useAdaGrad = true
-    val miniBatch = 100
-    val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
-
-    mvm.run(numIterations)
   }
 }
