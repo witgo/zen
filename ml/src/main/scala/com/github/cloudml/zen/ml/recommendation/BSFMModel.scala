@@ -39,7 +39,9 @@ class BSFMModel(
   val intercept: ED,
   val views: Array[Long],
   val classification: Boolean,
-  val factors: RDD[(Long, VD)]) extends Serializable with Saveable {
+  val factors: RDD[(Long, VD)],
+  val maxTarget: Double = Double.MaxValue,
+  val minTarget: Double = Double.MinValue) extends Serializable with Saveable {
   def predict(data: RDD[(Long, SV)]): RDD[(Long, ED)] = {
     val numFeatures = data.first()._2.size.toLong
     data.flatMap { case (sampleId, features) =>
@@ -61,15 +63,12 @@ class BSFMModel(
   }
 
   def loss(data: RDD[(Long, LabeledPoint)]): Double = {
-    // val minTarget = data.map(_._2.label).min()
-    // val maxTarget = data.map(_._2.label).max()
     val perd = predict(data.map(t => (t._1, t._2.features)))
     val label = data.map(t => (t._1, t._2.label))
     val scoreAndLabels = label.join(perd).map { case (_, (label, score)) =>
-      // var r = Math.max(score, minTarget)
-      // r = Math.min(r, maxTarget)
-      // pow(l - r, 2)
-      (score, label)
+      var r = Math.max(score, minTarget)
+      r = Math.min(r, maxTarget)
+      (r, label)
     }
     scoreAndLabels.persist(StorageLevel.MEMORY_AND_DISK)
     val ret = if (classification) auc(scoreAndLabels) else rmse(scoreAndLabels)
@@ -88,7 +87,8 @@ class BSFMModel(
   }
 
   override def save(sc: SparkContext, path: String): Unit = {
-    BSFMModel.SaveLoadV1_0.save(sc, path, k, intercept, views, classification, factors)
+    BSFMModel.SaveLoadV1_0.save(sc, path, k, intercept, views, classification, factors,
+      maxTarget, minTarget)
   }
 
   override protected def formatVersion: String = BSFMModel.SaveLoadV1_0.formatVersionV1_0
@@ -106,6 +106,8 @@ object BSFMModel extends Loader[BSFMModel] {
       val intercept = (metadata \ "intercept").extract[Double]
       val views = (metadata \ "views").extract[String].split(",").map(_.toLong)
       val k = (metadata \ "k").extract[Int]
+      val maxTarget = (metadata \ "maxTarget").extract[Double]
+      val minTarget = (metadata \ "minTarget").extract[Double]
       val dataPath = LoaderUtils.dataPath(path)
       val sqlContext = new SQLContext(sc)
       val dataRDD = sqlContext.read.parquet(dataPath)
@@ -117,7 +119,7 @@ object BSFMModel extends Loader[BSFMModel] {
         case Row(featureId: Long, factors: Seq[Double]) =>
           (featureId, factors.toArray)
       }
-      new BSFMModel(k, intercept, views, classification, factors)
+      new BSFMModel(k, intercept, views, classification, factors, maxTarget, minTarget)
     } else {
       throw new Exception(
         s"FMModel.load did not recognize model with (className, format version):" +
@@ -138,10 +140,13 @@ object BSFMModel extends Loader[BSFMModel] {
       intercept: Double,
       views: Array[Long],
       classification: Boolean,
-      factors: RDD[(Long, Array[Double])]): Unit = {
+      factors: RDD[(Long, Array[Double])],
+      maxTarget: Double,
+      minTarget: Double): Unit = {
       val metadata = compact(render
-        (("class" -> classNameV1_0) ~ ("version" -> formatVersionV1_0) ~ ("intercept" -> intercept) ~
-          ("k" -> k) ~ ("views" -> views.mkString(",")) ~ ("classification" -> classification)))
+      (("class" -> classNameV1_0) ~ ("version" -> formatVersionV1_0) ~ ("intercept" -> intercept) ~
+        ("maxTarget" -> maxTarget) ~ ("minTarget" -> minTarget) ~
+        ("k" -> k) ~ ("views" -> views.mkString(",")) ~ ("classification" -> classification)))
       sc.parallelize(Seq(metadata), 1).saveAsTextFile(LoaderUtils.metadataPath(path))
 
       val sqlContext = new SQLContext(sc)

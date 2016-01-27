@@ -134,7 +134,8 @@ private[ml] abstract class MVM(
       val alpha = regParam * 300D
       val regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
       val regDist = regRand.sample(viewSize * rank)
-      val gammaDist: Array[Double] = samplingGammaDist(innerEpoch)
+      val gammaDist: Array[Double] = null
+      //  samplingGammaDist(innerEpoch)
       val thisStepSize = stepSize
       val pSize = data.partitions.length
       val sampledData = if (samplingFraction == 1D) {
@@ -233,10 +234,10 @@ private[ml] abstract class MVM(
       rankIndices.foreach { rankId =>
         assert(!(g(rankId).isNaN || g(rankId).isInfinity))
         val reg = regDist(rankId + viewId * rank)
-        val gamma = gammaDist(rankId + viewId * rank)
+        // val gamma = gammaDist(rankId + viewId * rank)
         // g(rankId) += deg * (reg + rand.nextGaussian() * gamma) * w(rankId)
-        g(rankId) += deg * (reg * w(rankId) + rand.nextGaussian() * gamma)
-        // g(rankId) += deg * reg * w(rankId)
+        // g(rankId) += deg * (reg * w(rankId) + rand.nextGaussian() * gamma)
+        g(rankId) += deg * reg * w(rankId)
       }
     }
   }
