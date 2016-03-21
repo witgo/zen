@@ -30,7 +30,7 @@ import org.apache.spark.Logging
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.parameterserver.client.{VectorReader, MatrixReader, PSClient}
+import org.parameterserver.client.{VectorClient, MatrixClient, PSClient}
 import org.parameterserver.protocol.matrix.{Row, RowData}
 import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => PSV, Vector => PV}
 import org.parameterserver.protocol.{Array => PSArray, DataType, DoubleArray}
@@ -153,7 +153,7 @@ private[ml] abstract class BSFM(
       }.sortByKey().map(_._2)
       val costSum = sampledData.mapPartitionsWithIndex { case (pid, iter) =>
         val psClient = new PSClient(new PSConf(true))
-        val matrixReader = new MatrixReader(psClient, weightName)
+        val matrixReader = new MatrixClient(psClient, weightName)
         val rand = new XORShiftRandom(innerEpoch * (pSize + 13) + pid)
         var innerIter = 0
         val newIter = iter.grouped(batchSize).map { samples =>
