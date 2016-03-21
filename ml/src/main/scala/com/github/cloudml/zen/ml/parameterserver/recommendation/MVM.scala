@@ -30,7 +30,7 @@ import org.apache.spark.Logging
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.parameterserver.client.{MatrixReader, PSClient}
+import org.parameterserver.client.{MatrixClient, PSClient}
 import org.parameterserver.protocol.matrix.{Row, RowData}
 import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => PSV, Vector => PV}
 import org.parameterserver.protocol.{Array => PSArray, DataType, DoubleArray}
@@ -90,6 +90,7 @@ private[ml] abstract class MVM(
     psClient.close()
     wName
   }
+
   protected val gardSumName: String = {
     if (useAdaGrad) {
       val psClient = new PSClient(new PSConf(true))
@@ -148,7 +149,7 @@ private[ml] abstract class MVM(
       }.sortByKey().map(_._2)
       val costSum = sampledData.mapPartitionsWithIndex { case (pid, iter) =>
         val psClient = new PSClient(new PSConf(true))
-        val reader = new MatrixReader(psClient, weightName)
+        val reader = new MatrixClient(psClient, weightName)
         val rand = new XORShiftRandom(innerEpoch * pSize + pid)
         // val regRand = new GammaDistribution(new Well19937c(rand.nextLong()), alpha, beta)
         // val regDist = regRand.sample(viewSize * rank)
