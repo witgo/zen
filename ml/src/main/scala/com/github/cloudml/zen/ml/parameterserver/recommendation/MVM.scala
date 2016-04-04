@@ -49,6 +49,8 @@ private[ml] abstract class MVM(
 
   def regParam: Double
 
+  def shrinkageVal: Double = 1e-9
+
   def batchSize: Int
 
   def samplingFraction: Double = 1D
@@ -298,6 +300,7 @@ private[ml] abstract class MVM(
           ng(rankId) = -stepSize * g(rankId) + nu
         }
       }
+      l1(grad, g2Sum, features, featuresIds, newGrad, rand, stepSize, iter)
     } else {
       val epsilon = stepSize * math.pow(iter + 48D, -0.51)
       // val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
@@ -318,6 +321,36 @@ private[ml] abstract class MVM(
       }
     }
     psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
+  }
+
+  def l1(
+    grad: Array[VD],
+    g2Sum: Array[VD],
+    features: Array[VD],
+    featuresIds: Array[Int],
+    newGrad: Array[VD],
+    rand: JavaRandom,
+    stepSize: Double,
+    iter: Int): Unit = {
+    val rankIndices = 0 until rank
+    featuresIds.indices.filter(i => featuresIds(i) < numFeature).foreach { i =>
+      val w = features(i)
+      val g = grad(i)
+      val g2 = g2Sum(i)
+      val ng = newGrad(i)
+      val deg = g.last
+      assert(deg <= 1D)
+      rankIndices.foreach { rankId =>
+        if (shrinkageVal > 0) {
+          val si = stepSize * deg * shrinkageVal / (1E-6 + math.sqrt(g2(rankId)))
+          if (w(rankId).abs < si) {
+            ng(rankId) = -1 * w(rankId)
+          } else {
+            ng(rankId) += -1 * w(rankId).signum * si
+          }
+        }
+      }
+    }
   }
 
   def adaGrad(
