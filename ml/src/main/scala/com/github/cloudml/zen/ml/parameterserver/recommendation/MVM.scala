@@ -185,7 +185,7 @@ private[ml] abstract class MVM(
 
           reader.clear()
           grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
-          // l2(gammaDist, regDist, rand, featureIds, features, grad)
+          l2(gammaDist, regDist, rand, featureIds, features, grad)
 
           innerIter += 1
           updateWeight(grad, features, featureIds, psClient, rand, thisStepSize, innerIter)
@@ -310,14 +310,14 @@ private[ml] abstract class MVM(
           val g_i = (z2(offset) - l1) / d_i
           val r_i = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / d_i)
           // if (Utils.random.nextDouble() < 1E-7) println(g2(offset))
-          ng(offset) = g_i + r_i
+          ng(offset) = g_i - w(offset) + r_i
         } else {
-          ng(offset) = 0D
+          ng(offset) = 0D - w(offset)
         }
       }
     }
 
-    psClient.updateMatrix(weightName, array2RowData(newGrad, featuresIds))
+    psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
   }
 
   def adaGrad(
@@ -348,7 +348,7 @@ private[ml] abstract class MVM(
         val n_i = math.sqrt(sum(offset) + t2(offset))
         val n_i1 = math.sqrt(sum(offset))
         q(offset) = (n_i - n_i1) / alpha
-        sum(offset) = (beta + n_i) / alpha + lambda2
+        sum(offset) = (beta + n_i) / alpha
       }
     }
     psClient.add2Matrix(gardSumName, array2RowData(t2Sum, featuresIds))
