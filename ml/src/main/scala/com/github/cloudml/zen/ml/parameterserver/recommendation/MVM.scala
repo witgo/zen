@@ -49,7 +49,7 @@ private[ml] abstract class MVM(
 
   def regParam: Double
 
-  def shrinkageVal: Double = 1e-9
+  def shrinkageVal: Double = 1e-6
 
   def batchSize: Int
 
@@ -332,6 +332,7 @@ private[ml] abstract class MVM(
     rand: JavaRandom,
     stepSize: Double,
     iter: Int): Unit = {
+    if (shrinkageVal <= 0) return
     val rankIndices = 0 until rank
     featuresIds.indices.filter(i => featuresIds(i) < numFeature).foreach { i =>
       val w = features(i)
@@ -341,13 +342,11 @@ private[ml] abstract class MVM(
       val deg = g.last
       assert(deg <= 1D)
       rankIndices.foreach { rankId =>
-        if (shrinkageVal > 0) {
-          val si = stepSize * deg * shrinkageVal / (1E-6 + math.sqrt(g2(rankId)))
-          if (w(rankId).abs < si) {
-            ng(rankId) = -1 * w(rankId)
-          } else {
-            ng(rankId) += -1 * w(rankId).signum * si
-          }
+        val si = deg * shrinkageVal / g2(rankId)
+        if (w(rankId).abs < si) {
+          ng(rankId) = -1 * w(rankId)
+        } else {
+          ng(rankId) += -1 * w(rankId).signum * si
         }
       }
     }
