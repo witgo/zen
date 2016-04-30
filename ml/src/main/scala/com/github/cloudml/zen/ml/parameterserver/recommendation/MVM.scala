@@ -19,8 +19,6 @@ package com.github.cloudml.zen.ml.parameterserver.recommendation
 
 import java.util.{Random => JavaRandom, UUID}
 
-import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
-import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import com.github.cloudml.zen.graphx.util.CompletionIterator
 import com.github.cloudml.zen.ml.recommendation.MVMModel
 import com.github.cloudml.zen.ml.util.{XORShiftRandom, SparkUtils, Utils}
@@ -53,7 +51,7 @@ private[ml] abstract class MVM(
 
   def lambda2: Double = regParam
 
-  def lambda1: Double = 0D
+  def lambda1: Double = 1E-6
 
   def regParam: Double
 
@@ -310,14 +308,14 @@ private[ml] abstract class MVM(
           val g_i = (z2(offset) - l1) / d_i
           val r_i = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / d_i)
           // if (Utils.random.nextDouble() < 1E-7) println(g2(offset))
-          ng(offset) = g_i - w(offset) + r_i
+          ng(offset) = g_i + r_i
         } else {
-          ng(offset) = 0D - w(offset)
+          ng(offset) = 0D
         }
       }
     }
 
-    psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
+    psClient.updateMatrix(weightName, array2RowData(newGrad, featuresIds))
   }
 
   def adaGrad(
