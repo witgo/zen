@@ -18,8 +18,7 @@
 package com.github.cloudml.zen.examples.ml
 
 import scala.annotation.tailrec
-
-import com.github.cloudml.zen.ml.clustering.LDA
+import com.github.cloudml.zen.ml.clustering.{LDA, LDADefines}
 import com.github.cloudml.zen.ml.clustering.LDADefines._
 import com.github.cloudml.zen.ml.clustering.algorithm.LDATrainer
 import com.github.cloudml.zen.ml.util.SparkHacker
@@ -28,7 +27,7 @@ import com.github.cloudml.zen.ml.util.SparkUtils
 import org.apache.hadoop.fs.Path
 import org.apache.spark.graphx2._
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.{SparkContext, SparkConf}
+import org.apache.spark.{SparkConf, SparkContext}
 
 
 object LDADriver {
@@ -54,6 +53,7 @@ object LDADriver {
     val inputPath = options("inputpath")
     val outputPath = options("outputpath")
     val checkpointPath = outputPath + ".checkpoint"
+    val doc2topicDistPath = outputPath + ".doc2topicDist"
 
     val slvlStr = options.getOrElse("storagelevel", "MEMORY_AND_DISK").toUpperCase
     val storageLevel = StorageLevel.fromString(slvlStr)
@@ -97,6 +97,12 @@ object LDADriver {
       println(s"Error: output path $outputPath already exists.")
       System.exit(2)
     }
+
+    if (fs.exists(new Path(doc2topicDistPath))) {
+      println(s"Error: output path $doc2topicDistPath already exists.")
+      System.exit(2)
+    }
+
     fs.delete(new Path(checkpointPath), true)
 
     val sc = new SparkContext(conf)
@@ -111,7 +117,8 @@ object LDADriver {
 
       val algo = LDATrainer.initAlgorithm(algoStr, numTopics, numThreads)
       val docs = loadCorpus(sc, algo, storageLevel)
-      val trainingTime = runTraining(docs, numTopics, totalIter, alpha, beta, alphaAS, algo, storageLevel)
+      val trainingTime = runTraining(docs, doc2topicDistPath, numTopics,
+        totalIter, alpha, beta, alphaAS, algo, storageLevel)
       println(s"Training time consumed: $trainingTime seconds")
 
     } finally {
@@ -124,6 +131,7 @@ object LDADriver {
   }
 
   def runTraining(docs: EdgeRDD[TA],
+    doc2topicDistPath: String,
     numTopics: Int,
     totalIter: Int,
     alpha: Double,
@@ -133,9 +141,26 @@ object LDADriver {
     storageLevel: StorageLevel): Double = {
     SparkHacker.gcCleaner(30 * 60, 30 * 60, "LDA_gcCleaner")
     val trainingStartedTime = System.nanoTime()
-    val termModel = LDA.train(docs, totalIter, numTopics, alpha, beta, alphaAS, algo, storageLevel)
+    val lda = LDA(docs, numTopics, alpha, beta, alphaAS, algo, storageLevel)
+    lda.runGibbsSampling(totalIter)
+    var docVertices = LDADefines.decompressVertexRDD(lda.docVertices, numTopics)
+    (1 to 3).foreach { i =>
+      docVertices.checkpoint()
+      docVertices.count()
+      lda.runGibbsSampling(1)
+      docVertices = docVertices.join(LDADefines.decompressVertexRDD(lda.docVertices, numTopics)).
+        map { case (docId, (a, b)) =>
+          (docId, a + b)
+        }
+    }
+    docVertices.map { case (docId, topicDist) =>
+      val list = topicDist.activeIterator.filter(_._2 > 0).toSeq.sortBy(_._2).reverse
+        .map(t => s"${t._1}:${t._2}").mkString("\t")
+      s"${-(docId + 1)}\t$list"
+    }.saveAsTextFile(doc2topicDistPath)
     val trainingEndedTime = System.nanoTime()
     println("save the model in term-topic view")
+    val termModel = lda.toLDAModel
     termModel.save()
     (trainingEndedTime - trainingStartedTime) / 1e9
   }
