@@ -144,7 +144,7 @@ object LDADriver {
     val lda = LDA(docs, numTopics, alpha, beta, alphaAS, algo, storageLevel)
     lda.runGibbsSampling(totalIter)
     var docVertices = LDADefines.decompressVertexRDD(lda.docVertices, numTopics)
-    (1 to 3).foreach { i =>
+    (1 until 5).foreach { i =>
       docVertices.checkpoint()
       docVertices.count()
       lda.runGibbsSampling(1)
@@ -155,7 +155,7 @@ object LDADriver {
     }
     docVertices.map { case (docId, topicDist) =>
       val list = topicDist.activeIterator.filter(_._2 > 0).toSeq.sortBy(_._2).reverse
-        .map(t => s"${t._1}:${t._2}").mkString("\t")
+        .map(t => s"${t._1}:${t._2 / 5D}").mkString("\t")
       s"${-(docId + 1)}\t$list"
     }.saveAsTextFile(doc2topicDistPath)
     val trainingEndedTime = System.nanoTime()
