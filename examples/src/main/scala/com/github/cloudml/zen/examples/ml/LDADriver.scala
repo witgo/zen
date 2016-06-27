@@ -154,8 +154,9 @@ object LDADriver {
         }
     }
     docVertices.map { case (docId, topicDist) =>
+      val sum = topicDist.sum.toDouble
       val list = topicDist.activeIterator.filter(_._2 > 0).toSeq.sortBy(_._2).reverse
-        .map(t => s"${t._1}:${t._2 / 5D}").mkString("\t")
+        .map(t => s"${t._1}:${t._2 / sum}").mkString("\t")
       s"${-(docId + 1)}\t$list"
     }.saveAsTextFile(doc2topicDistPath)
     val trainingEndedTime = System.nanoTime()
