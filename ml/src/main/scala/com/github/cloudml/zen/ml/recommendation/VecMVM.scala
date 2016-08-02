@@ -27,7 +27,9 @@ import org.apache.spark.storage.StorageLevel
 
 import com.github.cloudml.zen.ml.util.SparkUtils._
 import com.github.cloudml.zen.ml.recommendation.MVM._
+
 import scala.math._
+import scala.util.Random
 
 /**
   * Multi-view Machines :
@@ -64,6 +66,10 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
   def elasticNetParam: Double
 
   def regParam: Double
+
+  def gen: Random = new Random()
+
+  def eta: Double = 1e-9
 
   protected[ml] def mask: Int = {
     max(1 / miniBatchFraction, 1).toInt
@@ -131,7 +137,9 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
         val newGrad = grad(i)(j) / (math.sqrt(his(i)(j)) + eps)
         if(newGrad != 0.0) {
           factors(i)(j) -= stepSize * (newGrad + factors(i)(j) * regParamL2)
-          if(shrinkageVal > 0) {
+          if (eta > 0) {
+            factors(i)(j) += gen.nextGaussian() * math.sqrt(stepSize * eta / (his(i)(j) + eps))
+          } else if (shrinkageVal > 0) {
             factors(i)(j) = math.signum(factors(i)(j)) * math.max(0.0, abs(factors(i)(j) - shrinkageVal))
           }
         }
