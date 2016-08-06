@@ -51,7 +51,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
       sv(movieId + maxUserId) = 1.0
       sv.compact()
       new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
-    }.persist(StorageLevel.MEMORY_AND_DISK)
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
     val testSet = movieLens.filter(t => t._5 % 5 == 3).map { case (userId, movieId, rating, _, _) =>
       val sv = BSV.zeros[Double](numFeatures)
       sv(userId) = 1.0
@@ -64,13 +64,13 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.02
+    val stepSize = 0.05
     val numIterations = 1000
-    val regParam = 0.09
-    val rank = 64
+    val regParam = 0.01
+    val rank = 32
 
 
-    val lfm = new VecMVMRegression(rank, stepSize, regParam, views, testSet, 0.1,
+    val lfm = new VecMVMRegression(rank, stepSize, regParam, views, trainSet, 1,
       numFeatures, 0, StorageLevel.MEMORY_AND_DISK)
     var iter = 0
     var model: MVMModel = null
