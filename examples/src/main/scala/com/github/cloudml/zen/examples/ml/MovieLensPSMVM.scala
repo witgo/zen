@@ -122,7 +122,7 @@ object MovieLensPSMVM extends Logging {
     logInfo(s"The number of samples: $numSamples, the number of features: $numFeatures")
     val eta = 2D / numSamples
     val lfm = new MVMRegression(trainSet.map(_._2), views, rank, stepSize, regular, batchSize,
-      useAdaGrad, samplingFraction, eta)
+      samplingFraction, eta)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {

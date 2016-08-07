@@ -23,10 +23,72 @@ import com.google.common.io.Files
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.util.MLUtils
+import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
-  test("binary classification") {
+
+  test("movieLens 1M (uid,mid)") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
+    val checkpointDir = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpointDir)
+
+    val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
+      iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
+        val Array(userId, movieId, rating, timestamp) = line.split("::")
+        val gen = (1125899906842597L * timestamp.toLong).abs
+        (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24), gen)
+      }
+    }.persist(StorageLevel.MEMORY_AND_DISK)
+    val maxUserId = movieLens.map(_._1).max + 1
+    val maxMovieId = movieLens.map(_._2).max + 1
+    val numFeatures = maxUserId + maxMovieId
+    val trainSet = movieLens.filter(t => t._5 % 5 != 3).map { case (userId, movieId, rating, _, _) =>
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv.compact()
+      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+    val testSet = movieLens.filter(t => t._5 % 5 == 3).map { case (userId, movieId, rating, _, _) =>
+      val sv = BSV.zeros[Double](numFeatures)
+      sv(userId) = 1.0
+      sv(movieId + maxUserId) = 1.0
+      sv.compact()
+      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+    trainSet.count()
+    testSet.count()
+    movieLens.unpersist()
+
+    val views = Array(maxUserId, numFeatures).map(_.toLong)
+    val stepSize = 0.1
+    val numIterations = 200
+    val regParam = 0D
+    val samplingFraction = 1D
+    val rank = 32
+
+    val lfm = new MVMRegression(trainSet, stepSize, views, regParam, 0D, rank,
+      true, true, samplingFraction)
+    var iter = 0
+    var model: MVMModel = null
+    while (iter < numIterations) {
+      val thisItr = if (iter < 10) {
+        math.min(5, numIterations - iter)
+      } else {
+        math.min(5, numIterations - iter)
+      }
+      iter += thisItr
+      lfm.run(thisItr)
+      model = lfm.saveModel()
+      model.factors.count()
+      val rmse = model.loss(testSet)
+      println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
+    }
+  }
+
+  ignore("binary classification") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
     val checkpoint = s"$sparkHome/target/tmp"

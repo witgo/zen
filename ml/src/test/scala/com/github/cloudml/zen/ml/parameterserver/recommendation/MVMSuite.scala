@@ -27,7 +27,7 @@ import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
-  test("movieLens 100k (uid,mid) ") {
+  test("movieLens 1M (uid,mid)") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -66,17 +66,16 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     // sys.exit(-1)
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.05
-    val numIterations = 1000
+    val stepSize = 0.03
+    val numIterations = 200
     val regParam = 0.12
     val eta = 1E-6
     val samplingFraction = 1D
-    val rank = 32
-    val useAdaGrad = true
+    val rank = 64
     val miniBatch = 100
 
-    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam, miniBatch,
-      useAdaGrad, samplingFraction, eta)
+    val lfm = new MVMRegression(trainSet, views, rank, stepSize, regParam,
+      miniBatch, samplingFraction, eta)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
@@ -113,9 +112,8 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val numIterations = 1000
     val regParam = 0
     val rank = 4
-    val useAdaGrad = true
     val miniBatch = 100
-    val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch, useAdaGrad)
+    val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch)
 
     mvm.run(numIterations)
   }

@@ -127,7 +127,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
       vertices.count()
       dataSet = GraphImpl.fromExistingRDDs(vertices, edges)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(s"(Iteration $iter/$iterations) loss:                     $rmse")
+      println(s"(Iteration $iter/$iterations) loss:                     $rmse")
       logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
       previousVertices.unpersist(blocking = false)
@@ -214,9 +214,7 @@ private[ml] abstract class MVM extends Serializable with Logging {
     gradient: VertexRDD[Array[Double]],
     iter: Int): VertexRDD[Array[Double]] = {
     if (useAdaGrad) {
-      val rho = math.exp(-math.log(2.0) / halfLife)
       val delta = adaGrad(gradientSum, gradient, epsilon, 1.0, iter)
-      // val delta = esgd(gradientSum, gradient, epsilon, 1.0, iter)
       checkpointGradientSum(delta)
       delta.setName(s"delta-$iter").persist(storageLevel).count()
 
@@ -255,34 +253,6 @@ private[ml] abstract class MVM extends Serializable with Logging {
       for (i <- 0 until gradLen) {
         newGradSum(i) = gs(i) * rho + pow(grad(i), 2)
         val div = epsilon + sqrt(newGradSum(i))
-        newGrad(i) = grad(i) / div
-      }
-      (newGrad, newGradSum)
-    }
-    newGradSum
-  }
-
-  protected def esgd(
-    gradientSum: VertexRDD[Array[Double]],
-    gradient: VertexRDD[Array[Double]],
-    epsilon: Double,
-    rho: Double,
-    iter: Int): VertexRDD[(Array[Double], Array[Double])] = {
-    val delta = if (gradientSum == null) {
-      features.mapValues(t => t.map(x => 0.0))
-    }
-    else {
-      gradientSum
-    }
-
-    val newGradSum = delta.innerJoin(gradient) { case (_, gs, grad) =>
-      val gradLen = grad.length
-      val newGradSum = new Array[Double](gradLen)
-      val newGrad = new Array[Double](gradLen)
-      for (i <- 0 until gradLen) {
-        val h = Utils.random.nextGaussian()
-        newGradSum(i) = gs(i) * rho + pow(h * grad(i), 2)
-        val div = epsilon + sqrt(newGradSum(i) / iter)
         newGrad(i) = grad(i) / div
       }
       (newGrad, newGradSum)
