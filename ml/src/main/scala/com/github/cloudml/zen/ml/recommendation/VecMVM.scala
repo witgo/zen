@@ -69,11 +69,13 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
 
   def gen: Random = new Random()
 
-  def eta: Double = 1e-9
+  def eta: Double = 1E-8
 
   protected[ml] def mask: Int = {
     max(1 / miniBatchFraction, 1).toInt
   }
+
+  @transient private lazy val his = Array.fill(featureSize + views.length, rank)(0D)
 
   def extDataSet: RDD[(Long, LabeledPoint)] = dataSet.map(x => {
     val start = views.last.toInt
@@ -87,7 +89,6 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
   extDataSet.count()
 
   def run(iterations: Int): Unit = {
-    var his = Array.fill(featureSize + views.length, rank)(0.0)
     for (iter <- 1 to iterations) {
       logInfo(s"Start train (Iteration $iter/$iterations)")
       val mod = mask
@@ -97,26 +98,39 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
       val startedAt = System.nanoTime()
       val out = extDataSet.mapPartitions(it => {
         val facs = broadcastData.value
-        var grad = Array.fill(featureSize + views.length, rank)(0.0)
+        var grad = Array.fill(featureSize + views.length, rank + 1)(0D)
         var trainingLoss = 0.0
         var numSamples = 0
-        while(it.hasNext){
+        while (it.hasNext) {
           val x = it.next()
-          if(mod == 1 || isSampled(random, seed, x._1, iter, mod)) {
+          if (mod == 1 || isSampled(random, seed, x._1, iter, mod)) {
             val out = getGradient(rank, x._2, facs, views, grad)
             grad = out._1
             trainingLoss += out._2
             numSamples += 1
-            }
+          }
         }
-        Array((numSamples, grad, trainingLoss)).toIterator
+        Iterator((numSamples, grad, trainingLoss))
       }).reduce(VecMVM.reduceGrad)
-      val gradients = out._2.map(x => x.map(_ / out._1))
+      val gradients = out._2
+      gradients.indices.foreach { fid =>
+        val factor = gradients(fid)
+        val grad = gradients(fid)
+        grad.indices.foreach { i =>
+          grad(i) /= out._1
+        }
+        val deg = grad.last
+        assert(deg <= 1D)
+        for (rankId <- 0 until rank) {
+          grad(rankId) += deg * factor(rankId) * regParam
+        }
+      }
+      assert(gradients.last.last == 1)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
-      logInfo(s"Training loss : ${getLoss(out)}")
-      logInfo(s"End  train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
+      println(s"Training loss (Iteration $iter/$iterations) : ${getLoss(out)}")
+      logInfo(s"End train (Iteration $iter/$iterations) takes:         $elapsedSeconds")
 
-      his = VecMVM.addGrad(his, gradients)
+      VecMVM.addGrad(his, gradients)
 
       updateWeight(his, gradients, factors)
     }
@@ -130,17 +144,15 @@ private[ml] abstract class VecMVM extends Serializable with Logging {
   def updateWeight(his: Array[Array[Double]], grad: Array[Array[Double]],
                      factors: Array[Array[Double]]): Array[Array[Double]] ={
     val eps = 1e-6
-    val regParamL2 = (1.0 - elasticNetParam) * regParam
-    val shrinkageVal = elasticNetParam * regParam * stepSize
-    for(i <- his.indices) {
-      for(j <- his(0).indices) {
-        val newGrad = grad(i)(j) / (math.sqrt(his(i)(j)) + eps)
-        if(newGrad != 0.0) {
-          factors(i)(j) -= stepSize * (newGrad + factors(i)(j) * regParamL2)
-          if (eta > 0) {
-            factors(i)(j) += gen.nextGaussian() * math.sqrt(stepSize * eta / (his(i)(j) + eps))
-          } else if (shrinkageVal > 0) {
-            factors(i)(j) = math.signum(factors(i)(j)) * math.max(0.0, abs(factors(i)(j) - shrinkageVal))
+    for (i <- his.indices) {
+      val deg = grad(i).last
+      for (j <- his.head.indices) {
+        val nu = math.sqrt(his(i)(j)) + eps
+        val newGrad = grad(i)(j) / nu
+        if (newGrad != 0D) {
+          factors(i)(j) -= stepSize * newGrad
+          if (eta > 0D) {
+            factors(i)(j) += deg * gen.nextGaussian() * math.sqrt(stepSize * eta / nu)
           }
         }
       }
@@ -173,7 +185,7 @@ class VecMVMRegression(val rank: Int,
                        val featureSize: Int,
                        val elasticNetParam: Double,
                        val storageLevel: StorageLevel) extends VecMVM {
-  val factors: Array[Array[Double]] = init(rank, views)
+  @transient val factors: Array[Array[Double]] = init(rank, views)
 
   def getGradient(rank: Int, vec: LabeledPoint, factors: Array[Array[Double]],
                   views: Array[Long], grads: Array[Array[Double]]): (Array[Array[Double]], Double) = {
@@ -190,6 +202,7 @@ class VecMVMRegression(val rank: Int,
         val delta = if(ms(i*vSize + vid) == 0.0) 0.0 else multi(i) / ms(i*vSize + vid)
         grads(index)(i) += (2.0 * (ybar - vec.label)* value * delta)
       }
+      grads(index)(rank) += 1
     })
     (grads, diff)
   }
@@ -208,7 +221,7 @@ class VecMVMClassification(val rank: Int,
                        val featureSize: Int,
                        val elasticNetParam: Double,
                        val storageLevel: StorageLevel) extends VecMVM {
-  val factors: Array[Array[Double]] = init(rank, views)
+  @transient val factors: Array[Array[Double]] = init(rank, views)
 
   @inline private def sigmoid(x: Double): Double = {
     1d / (1d + math.exp(-x))
@@ -229,6 +242,7 @@ class VecMVMClassification(val rank: Int,
         val delta = if(ms(i*vSize + vid) == 0.0) 0.0 else multi(i) / ms(i*vSize + vid)
         grads(index)(i) += (-vec.label * sigmoid(-vec.label * ybar))* value * delta
       }
+      grads(index)(rank) += 1
     })
     (grads, diff)
   }
@@ -236,6 +250,7 @@ class VecMVMClassification(val rank: Int,
   def getLoss(out: (Int, Array[Array[Double]], Double)) : Double = {
     out._3 / out._1
   }
+
   override def saveModel(): MVMModel = {
     new MVMModel(rank, views, true,
       dataSet.context.parallelize(factors.zipWithIndex.map(x => (x._2.toLong, x._1))))

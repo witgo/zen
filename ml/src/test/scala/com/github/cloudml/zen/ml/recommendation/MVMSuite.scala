@@ -28,7 +28,7 @@ import org.scalatest.{FunSuite, Matchers}
 
 class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
 
-  test("movieLens 100k (uid,mid) ") {
+  test("movieLens 1m (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -66,19 +66,18 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val stepSize = 0.05
     val numIterations = 1000
-    val regParam = 0.01
+    val regParam = 0.12
     val rank = 32
 
-
-    val lfm = new VecMVMRegression(rank, stepSize, regParam, views, trainSet, 1,
+    val lfm = new VecMVMRegression(rank, stepSize, regParam, views, trainSet, 0.01,
       numFeatures, 0, StorageLevel.MEMORY_AND_DISK)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {
-      val thisItr = if (iter < 10) {
-        math.min(5, numIterations - iter)
+      val thisItr = if (iter < 100) {
+        math.min(100, numIterations - iter)
       } else {
-        math.min(5, numIterations - iter)
+        math.min(100, numIterations - iter)
       }
       iter += thisItr
       lfm.run(thisItr)
