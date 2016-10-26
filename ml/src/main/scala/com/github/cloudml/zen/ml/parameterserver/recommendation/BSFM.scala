@@ -42,8 +42,6 @@ private[ml] abstract class BSFM(
 
   import BSFM._
 
-  def useAdaGrad: Boolean
-
   def stepSize: Double
 
   def regParam: (Double, Double, Double)
@@ -97,16 +95,12 @@ private[ml] abstract class BSFM(
   }
 
   protected val gardSumName: String = {
-    if (useAdaGrad) {
-      val psClient = new PSClient(new PSConf(true))
-      val gName = UUID.randomUUID().toString
-      psClient.createMatrix(gName, weightName)
-      // psClient.matrixAxpby(gName, 1D, weightName, 0D)
-      psClient.close()
-      gName
-    } else {
-      null
-    }
+    val psClient = new PSClient(new PSConf(true))
+    val gName = UUID.randomUUID().toString
+    psClient.createMatrix(gName, weightName)
+    // psClient.matrixAxpby(gName, 1D, weightName, 0D)
+    psClient.close()
+    gName
   }
 
   def eta: Double = 2D / numSamples
@@ -124,13 +118,11 @@ private[ml] abstract class BSFM(
   }
 
   protected def cleanGardSum(rho: Double): Unit = {
-    if (useAdaGrad) {
-      val psClient = new PSClient(new PSConf(true))
-      psClient.matrixAxpby(gardSumName, rho, weightName, 0D)
-      val b2 = psClient.getVector(biasName, Array(1)).asInstanceOf[DoubleArray].getValues.head
-      psClient.updateVector(biasName, Array(1), new DoubleArray(Array(rho * b2)))
-      psClient.close()
-    }
+    val psClient = new PSClient(new PSConf(true))
+    psClient.matrixAxpby(gardSumName, rho, weightName, 0D)
+    val b2 = psClient.getVector(biasName, Array(1)).asInstanceOf[DoubleArray].getValues.head
+    psClient.updateVector(biasName, Array(1), new DoubleArray(Array(rho * b2)))
+    psClient.close()
   }
 
   def run(iterations: Int): Unit = {
@@ -138,9 +130,7 @@ private[ml] abstract class BSFM(
       // cleanGardSum(math.exp(-math.log(2D) / 40))
       logInfo(s"Start train (Iteration $epoch/$iterations)")
       val startedAt = System.nanoTime()
-      val regDist = genRegDist()
-      val gammaDist: Array[Double] = null
-      // samplingGammaDist(innerEpoch)
+
       val thisStepSize = stepSize
       val pSize = data.partitions.length
       val sampledData = if (samplingFraction == 1D) {
@@ -179,7 +169,7 @@ private[ml] abstract class BSFM(
           matrixReader.clear()
           grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
           gradBias /= sampledSize
-          gradBias = l2(gammaDist, regDist, rand, bias, featureIds, features, grad, gradBias)
+          gradBias = l2(bias, featureIds, features, grad, gradBias)
 
           innerIter += 1
           updateWeight(gradBias, grad, features, featureIds, psClient, rand, thisStepSize, innerIter)
@@ -223,45 +213,26 @@ private[ml] abstract class BSFM(
     }
   }
 
-  private def genRegDist(): VD = {
-    val (regParam0, regParam1, regParam2) = regParam
-    val beta = 1D / 300D
-    var alpha = regParam2 * 300D
-    var regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
-    val regDist = regRand.sample(rank + 2)
-    alpha = regParam1 * 300D
-    regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
-    regDist(rank) = regRand.sample()
-    alpha = regParam0 * 300D
-    regRand = new GammaDistribution(new Well19937c(Utils.random.nextLong()), alpha, beta)
-    regDist(rank + 1) = regRand.sample()
-    regDist
-  }
 
   private def l2(
-    gammaDist: Array[Double],
-    regDist: Array[Double],
-    rand: JavaRandom,
     bias: Double,
     featureIds: Array[Int],
     features: Array[VD],
     grad: Array[VD],
     gradBias: Double): Double = {
     val rankIndices = 0 until (rank + 1)
+    val (regParam0, regParam1, regParam2) = regParam
     features.indices.foreach { i =>
       val w = features(i)
       val g = grad(i)
       val deg = g.last
       rankIndices.foreach { offset =>
         assert(!(g(offset).isNaN || g(offset).isInfinity))
-        val reg = regDist(offset + 1)
-        // val gamma = gammaDist(offset)
-        // g(offset) += deg * (reg + rand.nextGaussian() * gamma) * w(offset)
-        // g(offset) += deg * (reg * w(offset) + rand.nextGaussian() * gamma)
+        val reg = if (offset == rank) regParam1 else regParam2
         g(offset) += deg * reg * w(offset)
       }
     }
-    gradBias + regDist.last * bias
+    gradBias + regParam0 * bias
   }
 
   private def forwardSample(
@@ -296,43 +267,22 @@ private[ml] abstract class BSFM(
     val rankIndices = 0 until (rank + 1)
     val newGrad = Array.fill(featuresIds.length)(new VD(rank + 1))
     var newGradBias = 0D
-    if (useAdaGrad) {
-      val (gBias, bias2Sum, g2Sum) = adaGrad(gradBias, grad, featuresIds, psClient)
-      // val nuEpsilon = stepSize * math.pow(iter + 48D, -0.51)
-      // val nuEpsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
-      // val nuEpsilon = 2D * stepSize / numSamples
-      val nuEpsilon = stepSize * eta
-      newGradBias = -stepSize * gBias + rand.nextGaussian() * math.sqrt(nuEpsilon / bias2Sum)
-      featuresIds.indices.foreach { i =>
-        val g2 = g2Sum(i)
-        val g = grad(i)
-        val ng = newGrad(i)
-        val deg = g.last
-        assert(deg <= 1D)
-        rankIndices.foreach { rankId =>
-          val nu = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / g2(rankId))
-          // if (Utils.random.nextDouble() < 1E-7) println(g2(rankId))
-          ng(rankId) = -stepSize * g(rankId) + nu
-        }
-      }
-    } else {
-      val epsilon = stepSize * math.pow(iter + 48D, -0.51)
-      // val epsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
-      val nuEpsilon = epsilon * eta
-      newGradBias = -stepSize * gradBias + rand.nextGaussian() * math.sqrt(nuEpsilon)
-      featuresIds.indices.foreach { i =>
-        val g = grad(i)
-        // val w = features(i)
-        // val vid = featuresIds(i)
-        val ng = newGrad(i)
-        val deg = g.last
-        assert(deg <= 1D)
-        // val viewId = featureId2viewId(vid, views)
-        rankIndices.foreach { rankId =>
-          // val gamma = deg * rand.nextGaussian() * gammaDist(rankId + viewId * rank) / g2(rankId)
-          val nu = deg * rand.nextGaussian() * math.sqrt(nuEpsilon)
-          ng(rankId) = -epsilon * g(rankId) + nu
-        }
+    val (gBias, bias2Sum, g2Sum) = adaGrad(gradBias, grad, featuresIds, psClient)
+    // val nuEpsilon = stepSize * math.pow(iter + 48D, -0.51)
+    // val nuEpsilon = stepSize / (math.sqrt(iter + 15D) * math.log(iter + 14D))
+    // val nuEpsilon = 2D * stepSize / numSamples
+    val nuEpsilon = stepSize * eta
+    newGradBias = -stepSize * gBias + rand.nextGaussian() * math.sqrt(nuEpsilon / bias2Sum)
+    featuresIds.indices.foreach { i =>
+      val g2 = g2Sum(i)
+      val g = grad(i)
+      val ng = newGrad(i)
+      val deg = g.last
+      assert(deg <= 1D)
+      rankIndices.foreach { rankId =>
+        val nu = deg * rand.nextGaussian() * math.sqrt(nuEpsilon / g2(rankId))
+        // if (Utils.random.nextDouble() < 1E-7) println(g2(rankId))
+        ng(rankId) = -stepSize * g(rankId) + nu
       }
     }
     psClient.add2Vector(biasName, Array(0), new DoubleArray(Array(newGradBias)))
@@ -376,29 +326,6 @@ private[ml] abstract class BSFM(
     (gradBias / bias2Sum, bias2Sum, g2Sum)
   }
 
-  private def samplingGammaDist(innerEpoch: Int): Array[Double] = {
-    val rankIndices = 0 until (rank + 1)
-    val dist = features.aggregate(new Array[Double](rank + 2))((arr, a) => {
-      val (_, weight) = a
-      arr(rank + 1) += 1
-      for (offset <- rankIndices) {
-        arr(offset) += math.pow(weight(offset), 2)
-      }
-      arr
-    }, reduceInterval)
-    val gamma = new Array[Double](rank + 1)
-    val alpha = 1D
-    val beta = 1D
-    val rand = new Well19937c(innerEpoch)
-    val shape = alpha + dist.last / 2D
-    for (offset <- rankIndices) {
-      val scale = beta + dist(offset) / 2D
-      val rng = new GammaDistribution(rand, shape, scale)
-      gamma(offset) = math.sqrt(1D / rng.sample())
-    }
-    gamma
-  }
-
   def saveModel(): BSFMModel
 
   def predict(bias: Double, arr: Array[Double]): Double
@@ -424,7 +351,6 @@ class BSFMRegression(
   override val stepSize: Double,
   override val regParam: (Double, Double, Double),
   override val batchSize: Int,
-  override val useAdaGrad: Boolean,
   override val samplingFraction: Double = 1D,
   override val eta: Double = 1E-6) extends BSFM(data, rank) {
 
@@ -466,7 +392,6 @@ class BSFMClassification(
   override val stepSize: Double,
   override val regParam: (Double, Double, Double),
   override val batchSize: Int,
-  override val useAdaGrad: Boolean,
   override val samplingFraction: Double = 1D,
   override val eta: Double = 1E-6) extends BSFM(data, rank) {
 
@@ -513,11 +438,10 @@ object BSFM {
     stepSize: Double,
     regParam: (Double, Double, Double),
     miniBatch: Int = 100,
-    useAdaGrad: Boolean = false,
     samplingFraction: Double = 1D,
     eta: Double = 1E-4): BSFMModel = {
-    val mvm = new BSFMRegression(input, views, rank, stepSize, regParam, miniBatch,
-      useAdaGrad, samplingFraction, eta)
+    val mvm = new BSFMRegression(input, views, rank, stepSize, regParam,
+      miniBatch, samplingFraction, eta)
     mvm.run(numIterations)
     mvm.saveModel()
   }
@@ -530,14 +454,13 @@ object BSFM {
     stepSize: Double,
     regParam: (Double, Double, Double),
     miniBatch: Int = 100,
-    useAdaGrad: Boolean = false,
     samplingFraction: Double = 1D,
     eta: Double = 1E-4): BSFMModel = {
     val data = input.map { case LabeledPoint(label, features) =>
       LabeledPoint(if (label > 0D) 1D else 0D, features)
     }
-    val mvm = new BSFMClassification(data, views, rank, stepSize, regParam, miniBatch,
-      useAdaGrad, samplingFraction, eta)
+    val mvm = new BSFMClassification(data, views, rank, stepSize, regParam,
+      miniBatch, samplingFraction, eta)
     mvm.run(numIterations)
     mvm.saveModel()
   }
@@ -592,9 +515,9 @@ object BSFM {
   }
 
   /**
-    * arr(k + v * rank) = \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
-    * arr(viewSize * rank) = \sum_{i=1}^{n} x_{i}w{i}
-    */
+   * arr(k + v * rank) = \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+   * arr(viewSize * rank) = \sum_{i=1}^{n} x_{i}w{i}
+   */
   private[ml] def predictInterval(rank: Int, viewSize: Int, bias: Double, arr: VD): ED = {
     val wx = arr.last
     var sum2order = 0.0
@@ -616,10 +539,10 @@ object BSFM {
 
 
   /**
-    * arr = rank * viewSize + 1
-    * when f belongs to [viewId * rank ,(viewId +1) * rank)
-    * arr[f] = x_{i}v_{i,f}
-    */
+   * arr = rank * viewSize + 1
+   * when f belongs to [viewId * rank ,(viewId +1) * rank)
+   * arr[f] = x_{i}v_{i,f}
+   */
   private[ml] def forwardInterval(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): VD = {
     arr(arr.length - 1) += z * w(rank)
     var i = 0
@@ -632,13 +555,13 @@ object BSFM {
 
 
   /**
-    * m = rank + 1
-    * when k belongs to [0,rank)
-    * arr(k) = multi \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
-    * arr(rank)= multi x
-    * clustering: multi = 1/(1+ \exp(-\hat{y}(x|\Theta)) ) - y
-    * regression: multi = 2(\hat{y}(x|\Theta) -y)
-    */
+   * m = rank + 1
+   * when k belongs to [0,rank)
+   * arr(k) = multi \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+   * arr(rank)= multi x
+   * clustering: multi = 1/(1+ \exp(-\hat{y}(x|\Theta)) ) - y
+   * regression: multi = 2(\hat{y}(x|\Theta) -y)
+   */
   private[ml] def backwardInterval(
     rank: Int,
     viewId: Int,
@@ -657,9 +580,9 @@ object BSFM {
   }
 
   /**
-    * arr(k + v * rank)= \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
-    * arr(rank * viewSize) = x_l
-    */
+   * arr(k + v * rank)= \sum_{i \not{\epsilon} B_l}x_{i}v_{i,f}
+   * arr(rank * viewSize) = x_l
+   */
   private[ml] def sumInterval(rank: Int, viewSize: Int, arr: Array[Double]): VD = {
     val m = new Array[Double](rank)
     var i = 0

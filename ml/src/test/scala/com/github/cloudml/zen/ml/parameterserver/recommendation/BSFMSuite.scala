@@ -27,7 +27,7 @@ import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class BSFMSuite extends FunSuite with SharedSparkContext with Matchers {
-  test("movieLens 100k (uid,mid) ") {
+  test("movieLens 1M (uid,mid) ") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -43,19 +43,21 @@ class BSFMSuite extends FunSuite with SharedSparkContext with Matchers {
     val maxUserId = movieLens.map(_._1).max + 1
     val maxMovieId = movieLens.map(_._2).max + 1
     val numFeatures = maxUserId + maxMovieId
-    val trainSet = movieLens.filter(t => t._5 % 5 != 3).map { case (userId, movieId, rating, _, _) =>
-      val sv = BSV.zeros[Double](numFeatures)
-      sv(userId) = 1.0
-      sv(movieId + maxUserId) = 1.0
-      sv.compact()
-      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
+    val trainSet = movieLens.filter(t => t._5 % 5 != 3).map {
+      case (userId, movieId, rating, _, _) =>
+        val sv = BSV.zeros[Double](numFeatures)
+        sv(userId) = 1.0
+        sv(movieId + maxUserId) = 1.0
+        sv.compact()
+        new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
     }.persist(StorageLevel.MEMORY_AND_DISK)
-    val testSet = movieLens.filter(t => t._5 % 5 == 3).map { case (userId, movieId, rating, _, _) =>
-      val sv = BSV.zeros[Double](numFeatures)
-      sv(userId) = 1.0
-      sv(movieId + maxUserId) = 1.0
-      sv.compact()
-      new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
+    val testSet = movieLens.filter(t => t._5 % 5 == 3).map {
+      case (userId, movieId, rating, _, _) =>
+        val sv = BSV.zeros[Double](numFeatures)
+        sv(userId) = 1.0
+        sv(movieId + maxUserId) = 1.0
+        sv.compact()
+        new LabeledPoint(rating, new SSV(sv.length, sv.index, sv.data))
     }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
     trainSet.count()
     testSet.count()
@@ -63,16 +65,15 @@ class BSFMSuite extends FunSuite with SharedSparkContext with Matchers {
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
     val stepSize = 0.05
-    val numIterations = 1000
+    val numIterations = 200
     val regParam = (0.1, 0.1, 0.1)
     val eta = 1E-6
     val samplingFraction = 1D
     val rank = 32
-    val useAdaGrad = true
     val miniBatch = 100
 
-    val lfm = new BSFMRegression(trainSet, views, rank, stepSize, regParam, miniBatch,
-      useAdaGrad, samplingFraction, eta)
+    val lfm = new BSFMRegression(trainSet, views, rank, stepSize, regParam,
+      miniBatch, samplingFraction, eta)
     var iter = 0
     var model: BSFMModel = null
     while (iter < numIterations) {

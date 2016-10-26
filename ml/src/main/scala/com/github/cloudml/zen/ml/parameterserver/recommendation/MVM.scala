@@ -21,11 +21,14 @@ import java.util.{UUID, Random => JavaRandom}
 
 import breeze.linalg.{DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV}
 import org.apache.commons.math3.random.Well19937c
+import org.apache.commons.math3.distribution.GammaDistribution
+
 import org.apache.spark.Logging
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
+
 import org.parameterserver.client.{MatrixClient, PSClient}
 import org.parameterserver.protocol.matrix.{Row, RowData}
 import org.parameterserver.protocol.vector.{DenseVector => PDV, SparseVector => PSV, Vector => PV}
@@ -46,7 +49,7 @@ private[ml] abstract class MVM(
 
   def stepSize: Double
 
-  def regParam: Double
+  def regParam: (Double, Double)
 
   def batchSize: Int
 
@@ -75,7 +78,6 @@ private[ml] abstract class MVM(
   @transient val featureIds: RDD[Int] = extDataSet.map(_.features.toSparse).flatMap(_.indices).
     distinct.persist(storageLevel)
   featureIds.count()
-
 
   protected val weightName = {
     val psClient = new PSClient(new PSConf(true))
@@ -170,7 +172,7 @@ private[ml] abstract class MVM(
 
           reader.clear()
           grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
-          l2(weights, grad)
+          l2(featureIds, weights, grad)
           innerIter += 1
           updateWeight(grad, weights, featureIds, psClient, rand, thisStepSize, innerIter)
           Array(costSum, sampledSize.toDouble)
@@ -204,14 +206,19 @@ private[ml] abstract class MVM(
     }
   }
 
-  private def l2(features: Array[VD], grad: Array[VD]): Unit = {
+  private def l2(
+    featureIds: Array[Int],
+    features: Array[VD],
+    grad: Array[VD]): Unit = {
     val rankIndices = 0 until rank
-    features.indices.foreach { i =>
+    featureIds.indices.foreach { i =>
+      val fid = featureIds(i)
       val w = features(i)
       val g = grad(i)
       val deg = g.last
       rankIndices.foreach { rankId =>
-        g(rankId) += deg * regParam * w(rankId)
+        val reg = if (fid < numFeature) regParam._2 else regParam._1
+        g(rankId) += deg * reg * w(rankId)
       }
     }
   }
@@ -317,7 +324,7 @@ class MVMRegression(
   override val views: Array[Long],
   override val rank: Int,
   override val stepSize: Double,
-  override val regParam: Double,
+  override val regParam: (Double, Double),
   override val batchSize: Int,
   override val samplingFraction: Double = 1D,
   override val eta: Double = 1E-6) extends MVM(data, views, rank) {
@@ -357,7 +364,7 @@ class MVMClassification(
   override val views: Array[Long],
   override val rank: Int,
   override val stepSize: Double,
-  override val regParam: Double,
+  override val regParam: (Double, Double),
   override val batchSize: Int,
   override val samplingFraction: Double = 1D,
   override val eta: Double = 1E-6) extends MVM(data, views, rank) {
@@ -400,10 +407,10 @@ object MVM {
     rank: Int,
     numIterations: Int,
     stepSize: Double,
-    regParam: Double,
+    regParam: (Double, Double),
     miniBatch: Int = 100,
     samplingFraction: Double = 1D,
-    eta: Double = 1E-4): MVMModel = {
+    eta: Double = 1E-6): MVMModel = {
     val mvm = new MVMRegression(input, views, rank, stepSize, regParam, miniBatch,
       samplingFraction, eta)
     mvm.run(numIterations)
@@ -416,10 +423,10 @@ object MVM {
     rank: Int,
     numIterations: Int,
     stepSize: Double,
-    regParam: Double,
+    regParam: (Double, Double),
     miniBatch: Int = 100,
     samplingFraction: Double = 1D,
-    eta: Double = 1E-4): MVMModel = {
+    eta: Double = 1E-6): MVMModel = {
     val data = input.map { case LabeledPoint(label, features) =>
       LabeledPoint(if (label > 0D) 1D else 0D, features)
     }
@@ -479,9 +486,9 @@ object MVM {
   }
 
   /**
-    * arr(k + v * rank)= (\sum_{i_1 =1}^{I_1+1}z_{i_1}^{(1)}a_{i_1,j}^{(1)})
-    * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
-    */
+   * arr(k + v * rank)= (\sum_{i_1 =1}^{I_1+1}z_{i_1}^{(1)}a_{i_1,j}^{(1)})
+   * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
+   */
   private[ml] def predictInterval(rank: Int, arr: Array[Double]): ED = {
     val viewSize = arr.length / rank
     var sum = 0.0
@@ -500,10 +507,10 @@ object MVM {
   }
 
   /**
-    * arr = rank * viewSize
-    * when f belongs to [viewId * rank ,(viewId +1) * rank)
-    * arr[f] = z_{i_v}^{(1)}a_{i_{i},j}^{(1)}
-    */
+   * arr = rank * viewSize
+   * when f belongs to [viewId * rank ,(viewId +1) * rank)
+   * arr[f] = z_{i_v}^{(1)}a_{i_{i},j}^{(1)}
+   */
   private[ml] def forwardInterval(rank: Int, viewId: Int, arr: Array[Double], z: ED, w: VD): Array[Double] = {
     var i = 0
     while (i < rank) {
@@ -514,13 +521,13 @@ object MVM {
   }
 
   /**
-    * arr = rank * viewSize
-    * when v=viewId , k belongs to [0,rank]
-    * arr(k + v * rank) = \frac{\partial \hat{y}(x|\Theta )}{\partial\theta }
-    * return multi * \frac{\partial \hat{y}(x|\Theta )}{\partial\theta }
-    * clustering: multi = 1/(1+ \exp(-\hat{y}(x|\Theta)) ) - y
-    * regression: multi = 2(\hat{y}(x|\Theta) -y)
-    */
+   * arr = rank * viewSize
+   * when v=viewId , k belongs to [0,rank]
+   * arr(k + v * rank) = \frac{\partial \hat{y}(x|\Theta )}{\partial\theta }
+   * return multi * \frac{\partial \hat{y}(x|\Theta )}{\partial\theta }
+   * clustering: multi = 1/(1+ \exp(-\hat{y}(x|\Theta)) ) - y
+   * regression: multi = 2(\hat{y}(x|\Theta) -y)
+   */
   private[ml] def backwardInterval(
     rank: Int,
     viewId: Int,
@@ -538,9 +545,9 @@ object MVM {
   }
 
   /**
-    * arr(k + v * rank)= (\sum_{i_1 =1}^{I_1+1}z_{i_1}^{(1)}a_{i_1,j}^{(1)}) ..
-    * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
-    */
+   * arr(k + v * rank)= (\sum_{i_1 =1}^{I_1+1}z_{i_1}^{(1)}a_{i_1,j}^{(1)}) ..
+   * (\sum_{i_m =1}^{I_m+1}z_{i_m}^{(m)}a_{i_m,j}^{(m)})
+   */
   private[ml] def sumInterval(rank: Int, arr: Array[Double]): Array[Double] = {
     val viewSize = arr.length / rank
     val m = new Array[Double](rank)

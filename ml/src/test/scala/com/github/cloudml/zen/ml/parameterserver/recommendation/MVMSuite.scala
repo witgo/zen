@@ -33,7 +33,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val checkpointDir = s"$sparkHome/target/tmp"
     sc.setCheckpointDir(checkpointDir)
 
-    val movieLens = sc.textFile(dataSetFile, 2).mapPartitions { iter =>
+    val movieLens = sc.textFile(dataSetFile).repartition(4).mapPartitions { iter =>
       iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
         val Array(userId, movieId, rating, timestamp) = line.split("::")
         val gen = (1125899906842597L * timestamp.toLong).abs
@@ -61,14 +61,10 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     testSet.count()
     movieLens.unpersist()
 
-    // MLUtils.saveAsLibSVMFile(trainSet.repartition(1), s"$sparkHome/data/ml-1m/trainSet/")
-    // MLUtils.saveAsLibSVMFile(testSet.map(_._2).repartition(1), s"$sparkHome/data/ml-1m/testSet/")
-    // sys.exit(-1)
-
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.03
+    val stepSize = 0.05
     val numIterations = 200
-    val regParam = 0.12
+    val regParam = (0.1, 0.12)
     val eta = 1E-6
     val samplingFraction = 1D
     val rank = 64
@@ -110,7 +106,7 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val views = Array(40, numFeatures).map(_.toLong)
     val stepSize = 0.1
     val numIterations = 1000
-    val regParam = 0
+    val regParam = (0D, 0D)
     val rank = 4
     val miniBatch = 100
     val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch)

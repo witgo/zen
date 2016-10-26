@@ -38,7 +38,6 @@ object MovieLensPSMVM extends Logging {
     regular: Double = 0.1,
     rank: Int = 20,
     batchSize: Int = 100,
-    useAdaGrad: Boolean = true,
     useSVDPlusPlus: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
 
@@ -99,7 +98,7 @@ object MovieLensPSMVM extends Logging {
 
   def run(params: Params): Unit = {
     val Params(input, out, numIterations, numPartitions, stepSize, regular, rank,
-    batchSize, useAdaGrad, useSVDPlusPlus, kryo) = params
+    batchSize, useSVDPlusPlus, kryo) = params
     val samplingFraction = 1D
     val storageLevel = if (useSVDPlusPlus) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
     val checkpointDir = s"$out/checkpoint"
@@ -121,8 +120,8 @@ object MovieLensPSMVM extends Logging {
     val numSamples = trainSet.count()
     logInfo(s"The number of samples: $numSamples, the number of features: $numFeatures")
     val eta = 2D / numSamples
-    val lfm = new MVMRegression(trainSet.map(_._2), views, rank, stepSize, regular, batchSize,
-      samplingFraction, eta)
+    val lfm = new MVMRegression(trainSet.map(_._2), views, rank, stepSize,
+      (regular, regular), batchSize, samplingFraction, eta)
     var iter = 0
     var model: MVMModel = null
     while (iter < numIterations) {

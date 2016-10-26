@@ -37,7 +37,6 @@ object MovieLensPSBSFM extends Logging {
     regular: String = "0.01,0.01,0.01",
     rank: Int = 20,
     batchSize: Int = 100,
-    useAdaGrad: Boolean = false,
     useSVDPlusPlus: Boolean = false,
     kryo: Boolean = true) extends AbstractParams[Params]
 
@@ -70,9 +69,6 @@ object MovieLensPSBSFM extends Logging {
              |r2=2-way regularization, default: ${defaultParams.regular} (auto)
            """.stripMargin)
         .action((x, c) => c.copy(regular = x))
-      opt[Unit]("adagrad")
-        .text("use AdaGrad")
-        .action((_, c) => c.copy(useAdaGrad = true))
       opt[Unit]("svdPlusPlus")
         .text("use SVD++")
         .action((_, c) => c.copy(useSVDPlusPlus = true))
@@ -104,8 +100,8 @@ object MovieLensPSBSFM extends Logging {
   }
 
   def run(params: Params): Unit = {
-    val Params(input, out, numIterations, numPartitions, stepSize, regular, rank, batchSize,
-    useAdaGrad, useSVDPlusPlus, kryo) = params
+    val Params(input, out, numIterations, numPartitions, stepSize, regular, rank,
+    batchSize, useSVDPlusPlus, kryo) = params
     val storageLevel = if (useSVDPlusPlus) StorageLevel.DISK_ONLY else StorageLevel.MEMORY_AND_DISK
     val regs = regular.split(",").map(_.toDouble)
     val l2 = (regs(0), regs(1), regs(2))
@@ -129,8 +125,8 @@ object MovieLensPSBSFM extends Logging {
     logInfo(s"The number of samples: $numSamples, the number of features: $numFeatures")
     val eta = 2D / numSamples
 
-    val lfm = new BSFMRegression(trainSet.map(_._2),views, rank, stepSize, l2, batchSize,
-      useAdaGrad, 1.0, eta)
+    val lfm = new BSFMRegression(trainSet.map(_._2), views, rank, stepSize,
+      l2, batchSize, 1.0, eta)
     var iter = 0
     var model: BSFMModel = null
     while (iter < numIterations) {
