@@ -293,7 +293,7 @@ private[ml] abstract class MVM(
       val sum = g2Sum(i)
       val t2 = t2Sum(i)
       rankIndices.foreach { offset =>
-        sum(offset) = 1E-6 + math.sqrt(sum(offset) + t2(offset))
+        sum(offset) = math.sqrt(sum(offset) + t2(offset) + 1E-8)
         g(offset) /= sum(offset)
       }
     }

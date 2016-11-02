@@ -22,11 +22,13 @@ import com.github.cloudml.zen.ml.recommendation.FMModel
 import com.github.cloudml.zen.ml.util._
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.{FunSuite, Matchers}
 
 class FMSuite extends FunSuite with SharedSparkContext with Matchers {
-  test("movieLens 1m (uid,mid) ") {
+
+  test("movieLens 1m (uid,mid)") {
     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
     val dataSetFile = s"$sparkHome/data/ml-1m/ratings.dat"
     val checkpointDir = s"$sparkHome/target/tmp"
@@ -39,6 +41,7 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
         (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24), gen)
       }
     }.persist(StorageLevel.MEMORY_AND_DISK)
+
     val maxUserId = movieLens.map(_._1).max + 1
     val maxMovieId = movieLens.map(_._2).max + 1
     val numFeatures = maxUserId + maxMovieId
@@ -62,8 +65,8 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
 
     val stepSize = 0.05
     val numIterations = 200
-    val regParam = (0.1, 0.1, 0.1)
-    val eta = 1E-6
+    val regParam = (0.12, 0.12, 0.12)
+    val eta = 1E-5
     val samplingFraction = 1D
     val rank = 64
     val miniBatch = 100
@@ -83,6 +86,56 @@ class FMSuite extends FunSuite with SharedSparkContext with Matchers {
       model.factors.count()
       val rmse = model.loss(testSet)
       println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
+    }
+  }
+
+  ignore("binary classification") {
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val checkpoint = s"$sparkHome/target/tmp"
+    sc.setCheckpointDir(checkpoint)
+
+    val trainSet = MLUtils.loadLibSVMFile(sc, s"$sparkHome/data/agaricus.txt.train").map {
+      case LabeledPoint(label, features) =>
+        val newLabel = if (label > 0.0) 1.0 else 0.0
+        LabeledPoint(newLabel, features)
+    }.repartition(4).persist(StorageLevel.MEMORY_AND_DISK)
+
+
+    val testSet = MLUtils.loadLibSVMFile(sc, s"$sparkHome/data/agaricus.txt.test").map {
+      case LabeledPoint(label, features) =>
+        val newLabel = if (label > 0.0) 1.0 else 0.0
+        LabeledPoint(newLabel, features)
+    }.zipWithIndex().map(_.swap).persist(StorageLevel.MEMORY_AND_DISK)
+
+    val stepSize = 0.05
+    val numIterations = 200
+    val regParam = (0.05, 0.05, 0.05)
+    val eta = 1E-4
+    val samplingFraction = 1D
+    val rank = 16
+    val miniBatch = 100
+
+    assert(trainSet.first().features.size > 0)
+    assert(trainSet.count() > 0)
+    assert(testSet.count() > 0)
+
+    val lfm = new FMClassification(trainSet, rank, stepSize, regParam, miniBatch,
+      samplingFraction, eta)
+
+    var iter = 0
+    var model: FMModel = null
+    while (iter < numIterations) {
+      val thisItr = if (iter < 10) {
+        math.min(5, numIterations - iter)
+      } else {
+        math.min(5, numIterations - iter)
+      }
+      iter += thisItr
+      lfm.run(thisItr)
+      model = lfm.saveModel()
+      model.factors.count()
+      val auc = model.loss(testSet)
+      println(f"(Iteration $iter/$numIterations) Test AUC:                     $auc%1.6f")
     }
   }
 }

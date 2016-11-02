@@ -33,13 +33,21 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     val checkpointDir = s"$sparkHome/target/tmp"
     sc.setCheckpointDir(checkpointDir)
 
-    val movieLens = sc.textFile(dataSetFile).repartition(4).mapPartitions { iter =>
+    var movieLens = sc.textFile(dataSetFile, 4).repartition(4).mapPartitions { iter =>
       iter.filter(t => !t.startsWith("userId") && !t.isEmpty).map { line =>
         val Array(userId, movieId, rating, timestamp) = line.split("::")
         val gen = (1125899906842597L * timestamp.toLong).abs
         (userId.toInt, movieId.toInt, rating.toDouble, timestamp.toInt / (60 * 60 * 24), gen)
       }
-    }.persist(StorageLevel.MEMORY_AND_DISK)
+    }
+
+    val pSize = movieLens.partitions.length
+    val innerEpoch = 1117
+    movieLens = movieLens.mapPartitionsWithIndex { case (pid, iter) =>
+      val rand = new XORShiftRandom((innerEpoch + 119) * (pSize + 1) + pid)
+      iter.map(t => (rand.nextInt(), t))
+    }.sortByKey().map(_._2).persist(StorageLevel.MEMORY_AND_DISK)
+
     val maxUserId = movieLens.map(_._1).max + 1
     val maxMovieId = movieLens.map(_._2).max + 1
     val numFeatures = maxUserId + maxMovieId
@@ -62,8 +70,8 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
     movieLens.unpersist()
 
     val views = Array(maxUserId, numFeatures).map(_.toLong)
-    val stepSize = 0.05
-    val numIterations = 200
+    val stepSize = 0.03
+    val numIterations = 150
     val regParam = (0.1, 0.12)
     val eta = 1E-6
     val samplingFraction = 1D
@@ -87,30 +95,5 @@ class MVMSuite extends FunSuite with SharedSparkContext with Matchers {
       val rmse = model.loss(testSet)
       println(f"(Iteration $iter/$numIterations) Test RMSE:                     $rmse%1.6f")
     }
-  }
-
-  ignore("binary classification") {
-    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
-    val dataSetFile = s"$sparkHome/data/binary_classification_data.txt"
-    val checkpoint = s"$sparkHome/target/tmp"
-    sc.setCheckpointDir(checkpoint)
-    val dataSet = MLUtils.loadLibSVMFile(sc, dataSetFile).map {
-      case LabeledPoint(label, features) =>
-        val newLabel = if (label > 0.0) 1.0 else 0.0
-        val bsv = SparkUtils.toBreeze(features).asInstanceOf[BSV[Double]]
-        bsv(40) = 0
-        bsv.compact()
-        LabeledPoint(newLabel, SparkUtils.fromBreeze(bsv))
-    }.persist()
-    val numFeatures = dataSet.first().features.size
-    val views = Array(40, numFeatures).map(_.toLong)
-    val stepSize = 0.1
-    val numIterations = 1000
-    val regParam = (0D, 0D)
-    val rank = 4
-    val miniBatch = 100
-    val mvm = new MVMClassification(dataSet, views, rank, stepSize, regParam, miniBatch)
-
-    mvm.run(numIterations)
   }
 }

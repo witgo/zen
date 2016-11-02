@@ -55,15 +55,17 @@ private[ml] abstract class FM(
 
   val numSamples: Long = data.count()
   val numFeature = data.first().features.size
+  val biasId = numFeature + 1
   @transient lazy val featureIds: RDD[Int] = {
-    data.map(_.features.toSparse).flatMap(_.indices).distinct.persist(storageLevel)
+    data.map(_.features.toSparse).flatMap(_.indices).distinct.
+      union(data.sparkContext.makeRDD(Seq(biasId))).persist(storageLevel)
   }
 
   protected val weightName = {
     val psClient = new PSClient(new PSConf(true))
     val maxId = featureIds.max()
     val wName = UUID.randomUUID().toString
-    psClient.createMatrix(wName, false, true, maxId + 1, rank + 1, DataType.Double)
+    psClient.createMatrix(wName, false, true, maxId + 2, rank + 1, DataType.Double)
     featureIds.mapPartitionsWithIndex { case (pid, iter) =>
       val rand = new Well19937c(pid + 1173)
       iter.map { featureId =>
@@ -81,13 +83,6 @@ private[ml] abstract class FM(
       psClient.close()
     }
 
-    psClient.close()
-    wName
-  }
-  protected val biasName = {
-    val psClient = new PSClient(new PSConf(true))
-    val wName = UUID.randomUUID().toString
-    psClient.createVector(wName, true, 2, DataType.Double)
     psClient.close()
     wName
   }
@@ -118,8 +113,6 @@ private[ml] abstract class FM(
   protected def cleanGardSum(rho: Double): Unit = {
     val psClient = new PSClient(new PSConf(true))
     psClient.matrixAxpby(gardSumName, rho, weightName, 0D)
-    val b2 = psClient.getVector(biasName, Array(1)).asInstanceOf[DoubleArray].getValues.head
-    psClient.updateVector(biasName, Array(1), new DoubleArray(Array(rho * b2)))
     psClient.close()
   }
 
@@ -145,10 +138,10 @@ private[ml] abstract class FM(
         var innerIter = 0
         val newIter = iter.grouped(batchSize).map { samples =>
           var costSum = 0D
-          val bias = getBias(psClient)
           val sampledSize = samples.length
-          val featureIds = samples.map(_.features.toSparse).flatMap(_.indices).distinct.sorted.toArray
+          val featureIds = (samples.flatMap(_.features.toSparse.indices).distinct :+ biasId).toArray
           val features = rowData2Array(matrixReader.read(featureIds))
+          val bias = getBias(featureIds, features)
           val f2i = featureIds.zipWithIndex.toMap
           val grad = new Array[VD](featureIds.length)
           var gradBias = 0D
@@ -163,31 +156,29 @@ private[ml] abstract class FM(
             backwardSample(indices, values, multi, f2i, features, grad)
           }
 
+          grad(grad.length - 1) = new Array[Double](rank + 2)
+          grad(grad.length - 1)(0) = gradBias
           matrixReader.clear()
           grad.foreach(g => g.indices.foreach(i => g(i) /= sampledSize))
-          gradBias /= sampledSize
-          gradBias = l2(bias, featureIds, features, grad, gradBias)
+          l2(featureIds, features, grad)
 
           innerIter += 1
-          updateWeight(gradBias, grad, features, featureIds, psClient, rand, thisStepSize, innerIter)
+          updateWeight(grad, features, featureIds, psClient, rand, thisStepSize, innerIter)
           Array(costSum, sampledSize.toDouble)
         }
         CompletionIterator[Array[Double], Iterator[Array[Double]]](newIter, psClient.close())
       }.reduce(reduceInterval)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       val loss = lossSum(costSum.head, costSum.last.toLong)
-      logInfo(s"(Iteration $epoch/$iterations) loss:                     $loss")
+      println(s"(Iteration $epoch/$iterations) loss:                     $loss")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
     }
   }
 
-  private[ml] def getBias(psClient: PSClient = null): Double = {
-    val newPsClient = if (psClient == null) Some(new PSClient(new PSConf(true))) else None
-    val bias = newPsClient.getOrElse(psClient).getVector(biasName, Array(0)).
-      asInstanceOf[DoubleArray].getValues.head
-    newPsClient.foreach(_.close())
-    bias
+  private[ml] def getBias(featureIds: Array[Int], features: Array[VD]): Double = {
+    assert(featureIds.last == biasId)
+    return features.last.head
   }
 
   private def backwardSample(
@@ -209,16 +200,14 @@ private[ml] abstract class FM(
     }
   }
 
-
   private def l2(
-    bias: Double,
     featureIds: Array[Int],
     features: Array[VD],
-    grad: Array[VD],
-    gradBias: Double): Double = {
+    grad: Array[VD]): Unit = {
+    val bias = getBias(featureIds, features)
     val (regParam0, regParam1, regParam2) = regParam
     val rankIndices = 0 until (rank + 1)
-    features.indices.foreach { i =>
+    for (i <- 0 until featureIds.length - 1) {
       val w = features(i)
       val g = grad(i)
       val deg = g.last
@@ -228,7 +217,7 @@ private[ml] abstract class FM(
         g(offset) += deg * reg * w(offset)
       }
     }
-    gradBias + regParam0 * bias
+    grad(grad.length - 1)(0) += regParam0 * bias
   }
 
   private def forwardSample(
@@ -249,8 +238,13 @@ private[ml] abstract class FM(
     arr
   }
 
+  protected def getWeight(): (Double, RDD[(Long, VD)]) = {
+    val weights = features.map(t => (t._1.toLong, t._2)).persist(storageLevel)
+    (weights.filter(_._1 == biasId).first()._2.head,
+      weights.filter(_._1 < biasId))
+  }
+
   def updateWeight(
-    gradBias: Double,
     grad: Array[VD],
     features: Array[VD],
     featuresIds: Array[Int],
@@ -260,10 +254,8 @@ private[ml] abstract class FM(
     iter: Int): Unit = {
     val rankIndices = 0 until (rank + 1)
     val newGrad = Array.fill(featuresIds.length)(new VD(rank + 1))
-    var newGradBias = 0D
-    val (gBias, bias2Sum, g2Sum) = adaGrad(gradBias, grad, featuresIds, psClient)
+    val g2Sum = adaGrad(grad, featuresIds, psClient)
     val nuEpsilon = stepSize * eta
-    newGradBias = -stepSize * gBias + rand.nextGaussian() * math.sqrt(nuEpsilon / bias2Sum)
     featuresIds.indices.foreach { i =>
       val g2 = g2Sum(i)
       val g = grad(i)
@@ -276,15 +268,13 @@ private[ml] abstract class FM(
         ng(rankId) = -stepSize * g(rankId) + nu
       }
     }
-    psClient.add2Vector(biasName, Array(0), new DoubleArray(Array(newGradBias)))
     psClient.add2Matrix(weightName, array2RowData(newGrad, featuresIds))
   }
 
   def adaGrad(
-    gradBias: Double,
     grad: Array[VD],
     featuresIds: Array[Int],
-    psClient: PSClient): (Double, Double, Array[VD]) = {
+    psClient: PSClient): Array[VD] = {
     val rankIndices = 0 until (rank + 1)
     val t2Sum = grad.map { g =>
       val t2 = new Array[Double](rank + 1)
@@ -293,7 +283,6 @@ private[ml] abstract class FM(
       }
       t2
     }
-    val grad2Bias = gradBias * gradBias
 
     val rowData = psClient.getMatrix(gardSumName, featuresIds.map(f => new Row(f)))
     featuresIds.indices.foreach { i =>
@@ -305,16 +294,13 @@ private[ml] abstract class FM(
       val sum = g2Sum(i)
       val t2 = t2Sum(i)
       rankIndices.foreach { offset =>
-        sum(offset) = 1E-6 + math.sqrt(sum(offset) + t2(offset))
+        sum(offset) = math.sqrt(sum(offset) + t2(offset) + 1E-8)
         g(offset) /= sum(offset)
       }
     }
-    var bias2Sum = psClient.getVector(biasName, Array(1)).asInstanceOf[DoubleArray].getValues.head
-    bias2Sum = 1E-6 + math.sqrt(bias2Sum + grad2Bias)
 
-    psClient.add2Vector(biasName, Array(1), new DoubleArray(Array(grad2Bias)))
     psClient.add2Matrix(gardSumName, array2RowData(t2Sum, featuresIds))
-    (gradBias / bias2Sum, bias2Sum, g2Sum)
+    g2Sum
   }
 
   def saveModel(): FMModel
@@ -332,7 +318,6 @@ private[ml] abstract class FM(
   def backward(rank: Int, x: ED, arr: VD, multi: Double, factors: VD, grad: VD): Array[Double] = {
     backwardInterval(rank, x, arr, multi, factors, grad)
   }
-
 }
 
 class FMRegression(
@@ -352,7 +337,8 @@ class FMRegression(
   val min = data.map(_.label).min
 
   override def saveModel(): FMModel = {
-    new FMModel(rank, getBias(), false, features.map(t => (t._1.toLong, t._2)), max, min)
+    val (bias, features) = getWeight()
+    new FMModel(rank, bias, false, features, max, min)
   }
 
   override def predict(bias: Double, arr: Array[Double]): Double = {
@@ -390,7 +376,8 @@ class FMClassification(
     s"Sampling fraction ($samplingFraction) must be > 0 and <= 1")
 
   override def saveModel(): FMModel = {
-    new FMModel(rank, getBias(), true, features.map(t => (t._1.toLong, t._2)), 1D, 0D)
+    val (bias, features) = getWeight()
+    new FMModel(rank, bias, true, features, 1D, 0D)
   }
 
   override def predict(bias: Double, arr: Array[Double]): Double = {
