@@ -170,7 +170,7 @@ private[ml] abstract class FM(
       }.reduce(reduceInterval)
       val elapsedSeconds = (System.nanoTime() - startedAt) / 1e9
       val loss = lossSum(costSum.head, costSum.last.toLong)
-      println(s"(Iteration $epoch/$iterations) loss:                     $loss")
+      logInfo(s"(Iteration $epoch/$iterations) loss:                     $loss")
       logInfo(s"End  train (Iteration $epoch/$iterations) takes:         $elapsedSeconds")
       innerEpoch += 1
     }
@@ -396,7 +396,7 @@ class FMClassification(
   override def multiplier(bias: Double, arr: Array[Double], label: Double): (Array[Double], Double) = {
     val z = predict(bias, arr)
     val multi = sumInterval(rank, arr)
-    val diff = sigmoid(z) - label
+    val diff = z - label
     multi(0) = diff
     (multi, Utils.log1pExp(if (label > 0D) -z else z))
   }
